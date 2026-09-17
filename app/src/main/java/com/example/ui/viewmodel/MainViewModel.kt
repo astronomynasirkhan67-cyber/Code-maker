@@ -21,12 +21,14 @@ import com.example.ui.editor.AutocompleteHelper
 import com.example.ui.editor.AutocompleteItem
 import com.example.ui.editor.UndoRedoManager
 import com.example.compiler.TerminalLineType
+import com.example.data.model.IdeWorkflowState
 import com.example.upload.UploadService
 import com.example.upload.UploadStageState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -44,6 +46,14 @@ enum class Screen(val title: String) {
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val repository = AppRepository(application.applicationContext)
     val uploadService = UploadService(repository.usbHardwareManager)
+
+    // Workflow State
+    val workflowState: StateFlow<IdeWorkflowState> = repository.workflowState
+    val lastAttachedDevice: StateFlow<UsbBoardInfo?> = repository.usbHardwareManager.lastAttachedDevice
+
+    fun dismissAttachedBanner() {
+        repository.usbHardwareManager.dismissAttachedBanner()
+    }
 
     // Active Navigation Screen
     private val _currentScreen = MutableStateFlow(Screen.HOME)
@@ -450,7 +460,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _selectedUsbDevice.value = deviceInfo
     }
 
+    val hasCompiledBinary: Boolean
+        get() = repository.lastCompiledBinary != null
+
+    fun loadSampleBlinkFirmware(isEsp32: Boolean): Int {
+        val size = repository.loadSampleBlinkFirmware(isEsp32)
+        appendUploadLog(TerminalLine(TerminalLineType.SUCCESS, "Loaded sample Blink test firmware ($size bytes). Ready for hardware upload."))
+        return size
+    }
+
+    fun clearCompiledBinary() {
+        repository.clearCompiledBinary()
+        appendUploadLog(TerminalLine(TerminalLineType.INFO, "Cleared compiled firmware binary."))
+    }
+
     fun upload(targetDevice: UsbDevice?) {
+        val hex = repository.lastCompiledBinary
+        if (hex == null || hex.isEmpty()) {
+            // Requirement 4: Upload must NOT start if compilation has not succeeded!
+            appendUploadLog(TerminalLine(TerminalLineType.WARNING, "Cannot upload: Sketch must be compiled first! Compiling sketch now..."))
+            repository.addTerminalLine(TerminalLine(TerminalLineType.WARNING, "--- Compilation required before upload ---"))
+            compile()
+            return
+        }
         startUpload(targetDevice)
     }
 
@@ -459,6 +491,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val hex = repository.lastCompiledBinary
         val dev = targetDevice ?: _selectedUsbDevice.value?.device ?: connectedUsbDevices.value.firstOrNull()?.device
 
+        if (hex == null || hex.isEmpty()) {
+            _uploadStage.value = "Compilation Required"
+            appendUploadLog(TerminalLine(TerminalLineType.ERROR, "Upload blocked: No compiled firmware binary found. You must compile the sketch first."))
+            repository.toggleTerminalExpanded()
+            return
+        }
+
         _isUploading.value = true
         _uploadProgress.value = 0.05f
         _uploadStage.value = "Starting Upload"
@@ -466,7 +505,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repository.toggleTerminalExpanded()
 
         viewModelScope.launch {
-            uploadService.performUpload(dev, board, hex).collect { stage ->
+            uploadService.performUpload(
+                device = dev,
+                targetBoard = board,
+                compiledHexBytes = hex,
+                onTerminalLog = { line ->
+                    appendUploadLog(line)
+                    repository.addTerminalLine(line)
+                }
+            ).collect { stage ->
                 when (stage) {
                     is UploadStageState.Idle -> {}
                     is UploadStageState.InProgress -> {

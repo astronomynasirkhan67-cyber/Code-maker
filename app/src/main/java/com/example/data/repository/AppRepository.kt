@@ -12,6 +12,7 @@ import com.example.data.local.entity.LibraryEntity
 import com.example.data.local.entity.ProjectEntity
 import com.example.data.local.entity.ProjectFileEntity
 import com.example.data.local.entity.SettingEntity
+import com.example.data.model.IdeWorkflowState
 import com.example.data.usb.LineEnding
 import com.example.data.usb.SerialConnectionState
 import com.example.data.usb.SerialMessage
@@ -52,6 +53,10 @@ class AppRepository(
     val allLibraries: Flow<List<LibraryEntity>> = libraryDao.getAllLibraries()
     val installedLibraries: Flow<List<LibraryEntity>> = libraryDao.getInstalledLibraries()
 
+    // Workflow State Machine
+    private val _workflowState = MutableStateFlow(IdeWorkflowState.NO_USB_DEVICE)
+    val workflowState: StateFlow<IdeWorkflowState> = _workflowState.asStateFlow()
+
     // Active Project & File Selection State
     private val _currentProjectId = MutableStateFlow<Long?>(null)
     val currentProjectId: StateFlow<Long?> = _currentProjectId.asStateFlow()
@@ -73,7 +78,7 @@ class AppRepository(
     val compileProgress: StateFlow<Float> = _compileProgress.asStateFlow()
 
     private val _terminalLogs = MutableStateFlow<List<TerminalLine>>(listOf(
-        TerminalLine(TerminalLineType.INFO, "Mobile Arduino IDE v1.2 initialized. Ready.")
+        TerminalLine(TerminalLineType.INFO, "Mobile Arduino IDE v1.3 initialized. Ready.")
     ))
     val terminalLogs: StateFlow<List<TerminalLine>> = _terminalLogs.asStateFlow()
 
@@ -103,6 +108,37 @@ class AppRepository(
             }
             val defaultBoard = boardDao.getBoardByIdDirect("arduino_uno")
             _selectedBoard.value = defaultBoard
+
+            // Monitor USB devices to update workflow state machine
+            connectedUsbDevices.collect { devices ->
+                updateUsbWorkflowState(devices)
+            }
+        }
+    }
+
+    private fun updateUsbWorkflowState(devices: List<UsbBoardInfo>) {
+        if (_isCompiling.value) return
+        if (_workflowState.value == IdeWorkflowState.UPLOADING) return
+
+        if (devices.isEmpty()) {
+            _workflowState.value = if (_selectedBoard.value != null) {
+                IdeWorkflowState.BOARD_SELECTED
+            } else {
+                IdeWorkflowState.NO_USB_DEVICE
+            }
+        } else {
+            val hasPerm = devices.any { it.hasPermission }
+            if (hasPerm) {
+                if (_workflowState.value != IdeWorkflowState.COMPILE_SUCCESS &&
+                    _workflowState.value != IdeWorkflowState.COMPILE_FAILED &&
+                    _workflowState.value != IdeWorkflowState.UPLOAD_SUCCESS &&
+                    _workflowState.value != IdeWorkflowState.UPLOAD_FAILED
+                ) {
+                    _workflowState.value = IdeWorkflowState.USB_PERMISSION_GRANTED
+                }
+            } else {
+                _workflowState.value = IdeWorkflowState.USB_PERMISSION_REQUIRED
+            }
         }
     }
 
@@ -325,16 +361,17 @@ void loop() {
         if (board == null || currentFiles.isEmpty()) {
             addTerminalLine(TerminalLine(TerminalLineType.ERROR, "Compile error: No target board or sketch files loaded."))
             _isTerminalExpanded.value = true
+            _workflowState.value = IdeWorkflowState.COMPILE_FAILED
             return
         }
 
-        val pId = _currentProjectId.value
         val projectName = currentFiles.find { it.isMain }?.name?.removeSuffix(".ino") ?: "Sketch"
 
         _isCompiling.value = true
         _isTerminalExpanded.value = true
         _compileProgress.value = 0f
         _terminalLogs.value = emptyList()
+        _workflowState.value = IdeWorkflowState.COMPILING
 
         scope.launch {
             val installedLibs = libraryDao.getInstalledLibraries().firstOrNull() ?: emptyList()
@@ -353,10 +390,39 @@ void loop() {
                 progress.line?.let { line ->
                     addTerminalLine(line)
                 }
+
+                if (progress.isFinished) {
+                    if (progress.isSuccess && progress.binaryBytes != null) {
+                        lastCompiledBinary = progress.binaryBytes
+                        _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
+                    } else {
+                        lastCompiledBinary = null
+                        _workflowState.value = IdeWorkflowState.COMPILE_FAILED
+                    }
+                }
             }
 
             _isCompiling.value = false
         }
+    }
+
+    fun loadSampleBlinkFirmware(isEsp32: Boolean): Int {
+        val sample = if (isEsp32) {
+            // ESP32 image format (magic byte 0xE9)
+            ByteArray(4096) { i -> if (i == 0) 0xE9.toByte() else (i % 256).toByte() }
+        } else {
+            // Arduino Uno intel hex sample
+            ":100000000C945C000C946E000C946E000C946E00CA\n:00000001FF\n".toByteArray()
+        }
+        lastCompiledBinary = sample
+        _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
+        addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, "Loaded sample Blink test firmware (${sample.size} bytes). Ready for upload."))
+        return sample.size
+    }
+
+    fun clearCompiledBinary() {
+        lastCompiledBinary = null
+        _workflowState.value = IdeWorkflowState.BOARD_SELECTED
     }
 
     fun toggleTerminalExpanded() {
@@ -367,7 +433,7 @@ void loop() {
         _terminalLogs.value = emptyList()
     }
 
-    private fun addTerminalLine(line: TerminalLine) {
+    fun addTerminalLine(line: TerminalLine) {
         val current = _terminalLogs.value
         _terminalLogs.value = if (current.size > 400) {
             current.drop(current.size - 399) + line
@@ -381,20 +447,34 @@ void loop() {
         _isTerminalExpanded.value = true
         addTerminalLine(TerminalLine(TerminalLineType.INFO, "--- Starting Firmware Upload ---"))
 
+        val binary = lastCompiledBinary
+        if (binary == null || binary.isEmpty()) {
+            val err = "Upload blocked: No compiled firmware binary available. You must compile the sketch first."
+            addTerminalLine(TerminalLine(TerminalLineType.ERROR, err))
+            _workflowState.value = IdeWorkflowState.COMPILE_FAILED
+            return UploadResult.Failed(err, err)
+        }
+
+        _workflowState.value = IdeWorkflowState.UPLOADING
+
         val board = _selectedBoard.value
         val targetFqbn = board?.fqbn ?: "arduino:avr:uno"
 
         val result = usbHardwareManager.uploadFirmware(
             device = targetDevice,
             targetFqbn = targetFqbn,
-            compiledHexBytes = lastCompiledBinary
+            compiledBytes = binary,
+            onProgress = { _, _ -> },
+            onTerminalLog = { addTerminalLine(it) }
         )
 
         when (result) {
             is UploadResult.Success -> {
+                _workflowState.value = IdeWorkflowState.UPLOAD_SUCCESS
                 addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, result.log))
             }
             is UploadResult.Failed -> {
+                _workflowState.value = IdeWorkflowState.UPLOAD_FAILED
                 addTerminalLine(TerminalLine(TerminalLineType.ERROR, result.log))
             }
         }

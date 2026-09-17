@@ -21,15 +21,18 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SettingsInputAntenna
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Usb
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -55,10 +58,13 @@ import androidx.compose.ui.unit.sp
 import com.example.compiler.TerminalLine
 import com.example.compiler.TerminalLineType
 import com.example.data.local.entity.BoardEntity
+import com.example.data.model.IdeWorkflowState
 import com.example.data.usb.UsbBoardInfo
+import com.example.data.usb.UsbChipType
 import com.example.ui.theme.ArduinoAccentGreen
 import com.example.ui.theme.ArduinoAccentOrange
 import com.example.ui.theme.ArduinoAccentRed
+import com.example.ui.theme.ArduinoAccentYellow
 import com.example.ui.theme.ArduinoTeal
 import com.example.ui.theme.ArduinoTealDark
 import com.example.ui.theme.ArduinoTealLight
@@ -74,6 +80,8 @@ fun UploadScreen(
     selectedBoard: BoardEntity?,
     connectedDevices: List<UsbBoardInfo>,
     selectedDevice: UsbBoardInfo?,
+    workflowState: IdeWorkflowState,
+    hasCompiledBinary: Boolean,
     isUploading: Boolean,
     uploadProgress: Float,
     uploadStage: String,
@@ -81,6 +89,8 @@ fun UploadScreen(
     onSelectDevice: (UsbBoardInfo) -> Unit,
     onRequestPermission: (UsbDevice) -> Unit,
     onRefreshDevices: () -> Unit,
+    onVerifyClick: () -> Unit,
+    onLoadSampleBlink: (Boolean) -> Unit,
     onStartUpload: (UsbDevice?) -> Unit,
     onChangeBoardClick: () -> Unit,
     onOpenSerialMonitor: () -> Unit,
@@ -93,6 +103,9 @@ fun UploadScreen(
             listState.animateScrollToItem(uploadOutputLogs.size - 1)
         }
     }
+
+    val isTargetEsp32 = selectedBoard?.mcu?.contains("esp32", ignoreCase = true) == true ||
+            selectedBoard?.fqbn?.contains("esp32", ignoreCase = true) == true
 
     Box(
         modifier = modifier
@@ -124,7 +137,7 @@ fun UploadScreen(
                             style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
                         )
                         Text(
-                            text = "Flash compiled sketch to microcontroller via USB OTG",
+                            text = "Flash firmware directly over USB OTG to ESP32 / Arduino",
                             style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                         )
                     }
@@ -138,7 +151,52 @@ fun UploadScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Workflow State Tracker Banner
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = when (workflowState) {
+                    IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen.copy(alpha = 0.15f)
+                    IdeWorkflowState.UPLOAD_FAILED, IdeWorkflowState.COMPILE_FAILED -> ArduinoAccentRed.copy(alpha = 0.15f)
+                    IdeWorkflowState.UPLOADING, IdeWorkflowState.COMPILING -> ArduinoTeal.copy(alpha = 0.15f)
+                    IdeWorkflowState.USB_PERMISSION_REQUIRED -> ArduinoAccentOrange.copy(alpha = 0.15f)
+                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val statusColor = when (workflowState) {
+                        IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen
+                        IdeWorkflowState.UPLOAD_FAILED, IdeWorkflowState.COMPILE_FAILED -> ArduinoAccentRed
+                        IdeWorkflowState.UPLOADING, IdeWorkflowState.COMPILING -> ArduinoTealLight
+                        IdeWorkflowState.USB_PERMISSION_REQUIRED -> ArduinoAccentOrange
+                        else -> ArduinoAccentYellow
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(statusColor)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = workflowState.title,
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = statusColor)
+                        )
+                        Text(
+                            text = workflowState.description,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             // 1. Target Board Card
             Card(
@@ -149,7 +207,7 @@ fun UploadScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
+                        .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -160,7 +218,7 @@ fun UploadScreen(
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = ArduinoTeal.copy(alpha = 0.15f),
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(38.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(Icons.Default.DeveloperBoard, contentDescription = null, tint = ArduinoTealLight)
@@ -174,7 +232,7 @@ fun UploadScreen(
                             )
                             Text(
                                 text = "FQBN: ${selectedBoard?.fqbn ?: "None"} • MCU: ${selectedBoard?.mcu ?: "N/A"}",
-                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                             )
                         }
                     }
@@ -188,7 +246,7 @@ fun UploadScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // 2. USB Device & Connection Status Card
             Card(
@@ -196,14 +254,14 @@ fun UploadScreen(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
+                Column(modifier = Modifier.padding(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Usb, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(20.dp))
+                            Icon(Icons.Default.Usb, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "USB OTG Port & Device",
@@ -218,7 +276,7 @@ fun UploadScreen(
                             color = if (isConnected) ArduinoAccentGreen.copy(alpha = 0.15f) else ArduinoAccentRed.copy(alpha = 0.15f)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Box(
@@ -229,7 +287,7 @@ fun UploadScreen(
                                 )
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = if (isConnected) "DEVICE DETECTED" else "DISCONNECTED",
+                                    text = if (isConnected) "${connectedDevices.size} DEVICE(S)" else "DISCONNECTED",
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         color = if (isConnected) ArduinoAccentGreen else ArduinoAccentRed,
                                         fontWeight = FontWeight.Bold,
@@ -240,11 +298,11 @@ fun UploadScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
                     if (connectedDevices.isEmpty()) {
                         Text(
-                            text = "No USB microcontroller detected. Please plug in your Arduino / ESP board via a USB-C or OTG adapter cable and press Scan.",
+                            text = "No USB microcontroller detected. Plug in your ESP32 or Arduino via a USB-C or OTG adapter cable and tap Scan.",
                             style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                         )
                     } else {
@@ -277,8 +335,16 @@ fun UploadScreen(
                                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
                                             )
                                             Text(
-                                                text = "Port: ${devInfo.deviceName} • VID: 0x${Integer.toHexString(devInfo.vendorId).uppercase()} • PID: 0x${Integer.toHexString(devInfo.productId).uppercase()}",
-                                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                                text = "Chip: ${devInfo.chipType.label} • Port: ${devInfo.deviceName}",
+                                                style = MaterialTheme.typography.bodySmall.copy(
+                                                    color = ArduinoTealLight,
+                                                    fontWeight = FontWeight.Medium,
+                                                    fontSize = 11.sp
+                                                )
+                                            )
+                                            Text(
+                                                text = "VID: 0x${Integer.toHexString(devInfo.vendorId).uppercase()} • PID: 0x${Integer.toHexString(devInfo.productId).uppercase()}",
+                                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
                                             )
                                         }
 
@@ -312,9 +378,93 @@ fun UploadScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 3. Upload Progress Indicator
+            // 3. Firmware Compilation Status & Test Helpers
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (hasCompiledBinary) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (hasCompiledBinary) ArduinoAccentGreen else ArduinoAccentOrange,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (hasCompiledBinary) "Firmware Binary Ready" else "Compilation Required",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (hasCompiledBinary) ArduinoAccentGreen else ArduinoAccentOrange
+                                )
+                            )
+                        }
+
+                        // Fast helper buttons
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = { onLoadSampleBlink(isTargetEsp32) },
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("Load Test Blink", fontSize = 11.sp)
+                            }
+
+                            Button(
+                                onClick = onVerifyClick,
+                                shape = RoundedCornerShape(6.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal)
+                            ) {
+                                Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(12.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Verify/Compile", fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    if (!hasCompiledBinary) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Upload is gated: You must compile your sketch first to generate a valid binary, or tap 'Load Test Blink' to test flasher hardware immediately.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                        )
+                    }
+                }
+            }
+
+            // ESP32 Manual Bootloader Hint if ESP32 selected
+            if (isTargetEsp32) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "ESP32 Tip: If auto-reset fails, hold BOOT (IO0), tap EN (RST) once, release BOOT, then tap Upload.",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 4. Upload Progress Indicator
             if (isUploading || uploadProgress > 0f) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Row(
@@ -341,15 +491,15 @@ fun UploadScreen(
                         trackColor = ArduinoTealDark
                     )
                 }
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // 4. Upload Terminal Output
+            // 5. Upload Terminal Output
             Text(
                 text = "Upload Output & Handshake Logs",
                 style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
             Box(
                 modifier = Modifier
@@ -361,10 +511,10 @@ fun UploadScreen(
             ) {
                 if (uploadOutputLogs.isEmpty()) {
                     Text(
-                        text = "Ready to upload. Ensure your board is connected via USB OTG and press 'Upload Firmware'.\n\nThe upload service performs genuine STK500 / AVR or ESP protocol sync before flashing.",
+                        text = "Ready to upload. Ensure your board is connected via USB OTG and press 'Upload Firmware'.\n\nSupports ESP32 ROM bootloader (SLIP protocol) and Arduino AVR STK500v1.",
                         color = TerminalText.copy(alpha = 0.6f),
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp
+                        fontSize = 11.sp
                     )
                 } else {
                     LazyColumn(
@@ -391,9 +541,9 @@ fun UploadScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // 5. Action Buttons: Upload & Serial Monitor
+            // 6. Action Buttons: Upload & Serial Monitor
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
