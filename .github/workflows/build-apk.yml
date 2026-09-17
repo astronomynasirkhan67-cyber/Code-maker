@@ -32,8 +32,15 @@ jobs:
 
       - name: 3. Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 platforms;android-36.1 build-tools;36.0.0'
 
-      - name: 4. Restore Debug Keystore
+      - name: 4. Install only valid SDK packages
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-36" "platforms;android-36.1" "build-tools;36.0.0"
+
+      - name: 5. Restore Debug Keystore
         run: |
           if [ -f debug.keystore.base64 ]; then
             echo "Restoring debug.keystore from base64 artifact..."
@@ -43,16 +50,16 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: 5. Make Gradle Executable
+      - name: 6. Make Gradle Wrapper executable
         run: chmod +x gradlew
 
-      - name: 6. Run Gradle Build & Package Debug APK
+      - name: 7. Run Gradle task to build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: 7. Upload APK Artifact
+      - name: 8. Upload generated APK as artifact
         uses: actions/upload-artifact@v4
         with:
           name: mobile-arduino-ide-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
           if-no-files-found: error
