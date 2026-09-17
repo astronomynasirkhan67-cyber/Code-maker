@@ -1,0 +1,6 @@
+{
+  "name": "Mobile Arduino IDE",
+  "description": "Mobile Arduino IDE with professional C++ code editor, USB OTG serial monitor, boards manager, library manager, and modular compilation engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
