@@ -25,28 +25,44 @@ enum class IdeWorkflowState(val title: String, val description: String) {
         title = "Board Selected",
         description = "Target board model has been configured."
     ),
+    SYNTAX_ERROR(
+        title = "Syntax Error",
+        description = "Syntax errors detected during sketch code validation."
+    ),
+    COMPILER_MISSING(
+        title = "ESP32 Compiler Toolchain Not Installed",
+        description = "ESP32 compiler toolchain is not available. Configure an Arduino CLI build server in Settings or install the core."
+    ),
+    CORE_MISSING(
+        title = "ESP32 Platform Core Not Installed",
+        description = "Target board platform core is not installed. Open Boards Manager to install it."
+    ),
     COMPILING(
         title = "Compiling",
         description = "Processing and compiling sketch source code."
     ),
     COMPILE_FAILED(
         title = "Compilation Failed",
-        description = "Compilation errors detected in sketch code or missing toolchain."
+        description = "Toolchain compiler failed to build the sketch binaries."
     ),
     COMPILE_SUCCESS(
         title = "Compilation Successful",
         description = "Sketch compiled successfully and flashable binary is ready."
     ),
+    FIRMWARE_READY(
+        title = "Firmware Ready",
+        description = "Firmware binaries are verified and ready to flash."
+    ),
     UPLOADING(
         title = "Uploading Firmware",
-        description = "Flashing firmware to microcontroller via USB."
+        description = "Flashing firmware to microcontroller via USB OTG."
     ),
     UPLOAD_FAILED(
-        title = "Upload Failed",
+        title = "USB Upload Failed",
         description = "Failed to sync or flash firmware to microcontroller."
     ),
     UPLOAD_SUCCESS(
-        title = "Upload Successful",
+        title = "USB Upload Successful",
         description = "Firmware written and verified on microcontroller."
     ),
     USB_DISCONNECTED(

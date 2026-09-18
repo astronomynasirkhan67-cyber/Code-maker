@@ -87,8 +87,14 @@ interface BoardDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBoards(boards: List<BoardEntity>)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBoard(board: BoardEntity)
+
     @Query("UPDATE boards SET isInstalled = :installed WHERE id = :id")
     suspend fun setBoardInstalled(id: String, installed: Boolean)
+
+    @Query("UPDATE boards SET isInstalled = :installed WHERE fqbn LIKE 'esp32:%' OR category LIKE 'ESP%'")
+    suspend fun setEsp32Installed(installed: Boolean)
 }
 
 @Dao

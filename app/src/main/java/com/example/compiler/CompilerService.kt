@@ -44,6 +44,8 @@ data class CompileProgress(
     val isFinished: Boolean = false,
     val isSuccess: Boolean = false,
     val isToolchainMissing: Boolean = false,
+    val isSyntaxError: Boolean = false,
+    val isCoreMissing: Boolean = false,
     val binaryBytes: ByteArray? = null,
     val firmwarePackage: FirmwarePackage? = null
 ) {
@@ -57,6 +59,8 @@ data class CompileProgress(
         if (isFinished != other.isFinished) return false
         if (isSuccess != other.isSuccess) return false
         if (isToolchainMissing != other.isToolchainMissing) return false
+        if (isSyntaxError != other.isSyntaxError) return false
+        if (isCoreMissing != other.isCoreMissing) return false
         if (binaryBytes != null) {
             if (other.binaryBytes == null) return false
             if (!binaryBytes.contentEquals(other.binaryBytes)) return false
@@ -71,6 +75,8 @@ data class CompileProgress(
         result = 31 * result + isFinished.hashCode()
         result = 31 * result + isSuccess.hashCode()
         result = 31 * result + isToolchainMissing.hashCode()
+        result = 31 * result + isSyntaxError.hashCode()
+        result = 31 * result + isCoreMissing.hashCode()
         result = 31 * result + (binaryBytes?.contentHashCode() ?: 0)
         result = 31 * result + (firmwarePackage?.hashCode() ?: 0)
         return result
@@ -273,6 +279,7 @@ class CompilerService(
         targetBoard: BoardEntity,
         installedLibraries: List<LibraryEntity>,
         remoteCompilerUrl: String,
+        compilerBackend: String = "server",
         verboseOutput: Boolean = true
     ): Flow<CompileProgress> = flow {
         val isEsp32 = targetBoard.fqbn.contains("esp32", ignoreCase = true) ||
@@ -286,6 +293,23 @@ class CompilerService(
             TerminalLineType.INFO,
             "Target board: ${targetBoard.name} [${targetBoard.fqbn}] (MCU: ${targetBoard.mcu}, Clock: ${targetBoard.clockSpeed})"
         )))
+
+        // Verify target board platform installation
+        if (!targetBoard.isInstalled) {
+            emit(CompileProgress(
+                stage = "Target Core Missing",
+                progress = 1.0f,
+                line = TerminalLine(
+                    TerminalLineType.ERROR,
+                    "Target board platform for '${targetBoard.name}' (${targetBoard.fqbn}) is not installed. Open Boards Manager to install the platform core."
+                ),
+                isFinished = true,
+                isSuccess = false,
+                isCoreMissing = true
+            ))
+            return@flow
+        }
+
         emit(CompileProgress("Source Check", 0.15f, TerminalLine(
             TerminalLineType.INFO,
             "Compiling sketch: $projectName (${files.size} source file(s))..."
@@ -455,14 +479,15 @@ class CompilerService(
 
         if (collectedErrors.isNotEmpty()) {
             emit(CompileProgress(
-                stage = "Compilation Failed",
+                stage = "Syntax Errors Detected",
                 progress = 1.0f,
                 line = TerminalLine(
                     TerminalLineType.ERROR,
-                    "Compilation halted: ${collectedErrors.size} syntax error(s) found. Fix errors to continue."
+                    "Compilation halted: ${collectedErrors.size} syntax error(s) found in sketch code. Fix errors to continue."
                 ),
                 isFinished = true,
-                isSuccess = false
+                isSuccess = false,
+                isSyntaxError = true
             ))
             return@flow
         }
@@ -600,14 +625,20 @@ class CompilerService(
                 ))
             }
         } else {
-            // No Build Server configured and local compiler check
+            // No Build Server configured or local compiler backend chosen
             if (isEsp32) {
+                val backendMsg = if (compilerBackend == "local") {
+                    "ESP32 local compiler is unavailable on this Android device. Configure an Arduino CLI build server in Settings -> Compiler."
+                } else {
+                    "ESP32 compilation blocked: Arduino CLI Build Server is not configured. Configure server URL in Settings -> Compiler."
+                }
+
                 emit(CompileProgress(
                     stage = "Compiler Toolchain Missing",
                     progress = 1.0f,
                     line = TerminalLine(
                         TerminalLineType.ERROR,
-                        "ESP32 compilation blocked: Compiler toolchain is not available."
+                        backendMsg
                     ),
                     isFinished = true,
                     isSuccess = false,
@@ -619,15 +650,15 @@ class CompilerService(
                     progress = 1.0f,
                     line = TerminalLine(
                         TerminalLineType.INFO,
-                        """[ESP32 Compiler Status]
-- Sketch Syntax Analyzer: 0 errors detected (syntax is valid).
-- Native Xtensa Compiler (xtensa-esp32-elf-gcc): Not installed locally on Android storage.
-- Arduino CLI Build Server: Not configured.
-- Result: Real ESP32 firmware binary (.bin) cannot be produced without the compiler toolchain.
+                        """[ESP32 Toolchain Status]
+- Compiler Backend: ${if (compilerBackend == "local") "Local Compiler" else "Build Server"}
+- Syntax Verification: Passed (0 errors detected)
+- Local Native Xtensa Compiler: Not available on this Android device
+- Arduino CLI Build Server: ${if (cleanUrl.isEmpty()) "Not configured" else cleanUrl}
 
-REQUIRED ACTIONS:
-1. Tap 'Settings' -> 'Compiler Settings' and enter your Arduino CLI Build Server URL.
-2. Or tap 'Load Test Blink' on the Upload screen to test USB OTG flashing immediately using the bundled ESP32 Blink firmware.""".trimIndent()
+ACTIONS:
+1. Open Settings -> Compiler -> Build Server URL to connect your Arduino CLI daemon.
+2. Or tap 'Load Test Blink' on the Upload screen to flash precompiled ESP32 Blink firmware directly via USB OTG.""".trimIndent()
                     ),
                     isFinished = true,
                     isSuccess = false,

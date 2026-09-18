@@ -1,12 +1,15 @@
 package com.example.ui.upload
 
 import android.hardware.usb.UsbDevice
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,32 +26,45 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DeveloperBoard
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsInputAntenna
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Memory
-import com.example.firmware.FirmwarePackage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.compiler.TerminalLine
@@ -63,7 +80,7 @@ import com.example.compiler.TerminalLineType
 import com.example.data.local.entity.BoardEntity
 import com.example.data.model.IdeWorkflowState
 import com.example.data.usb.UsbBoardInfo
-import com.example.data.usb.UsbChipType
+import com.example.firmware.FirmwarePackage
 import com.example.ui.theme.ArduinoAccentGreen
 import com.example.ui.theme.ArduinoAccentOrange
 import com.example.ui.theme.ArduinoAccentRed
@@ -78,6 +95,7 @@ import com.example.ui.theme.TerminalSuccess
 import com.example.ui.theme.TerminalText
 import com.example.ui.theme.TerminalWarning
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun UploadScreen(
     selectedBoard: BoardEntity?,
@@ -99,281 +117,237 @@ fun UploadScreen(
     onChangeBoardClick: () -> Unit,
     onOpenSerialMonitor: () -> Unit,
     onExportFirmwareZip: (() -> Unit)? = null,
+    onNavigateToEditor: (() -> Unit)? = null,
+    onNavigateToSettings: (() -> Unit)? = null,
+    onNavigateToBoards: (() -> Unit)? = null,
+    onLoadManualFirmware: ((FirmwarePackage) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val listState = rememberLazyListState()
-
-    LaunchedEffect(uploadOutputLogs.size) {
-        if (uploadOutputLogs.isNotEmpty()) {
-            listState.animateScrollToItem(uploadOutputLogs.size - 1)
-        }
-    }
+    var isConsoleExpanded by remember { mutableStateOf(false) }
+    var showManualFlashDialog by remember { mutableStateOf(false) }
 
     val isTargetEsp32 = selectedBoard?.mcu?.contains("esp32", ignoreCase = true) == true ||
             selectedBoard?.fqbn?.contains("esp32", ignoreCase = true) == true
+
+    val hasUsb = connectedDevices.isNotEmpty()
+    val activeDevice = selectedDevice ?: connectedDevices.firstOrNull()
+
+    // State-aware button logic
+    val isCompiling = workflowState == IdeWorkflowState.COMPILING
+    val canCompile = !isCompiling && !isUploading
+    val hasFirmware = hasCompiledBinary || activeFirmwarePackage != null
+    val canUpload = !isCompiling && !isUploading && hasFirmware && hasUsb && (activeDevice?.hasPermission == true)
+
+    val logsListState = rememberLazyListState()
+    LaunchedEffect(uploadOutputLogs.size) {
+        if (uploadOutputLogs.isNotEmpty()) {
+            logsListState.animateScrollToItem(uploadOutputLogs.size - 1)
+        }
+    }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Screen Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Upload,
-                        contentDescription = null,
-                        tint = ArduinoTealLight,
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = "Firmware Upload",
-                            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
-                        )
-                        Text(
-                            text = "Flash firmware directly over USB OTG to ESP32 / Arduino",
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = onRefreshDevices,
-                    modifier = Modifier.testTag("refresh_usb_button")
-                ) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Scan USB Devices")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Workflow State Tracker Banner
-            Surface(
-                shape = RoundedCornerShape(10.dp),
-                color = when (workflowState) {
-                    IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen.copy(alpha = 0.15f)
-                    IdeWorkflowState.UPLOAD_FAILED, IdeWorkflowState.COMPILE_FAILED -> ArduinoAccentRed.copy(alpha = 0.15f)
-                    IdeWorkflowState.UPLOADING, IdeWorkflowState.COMPILING -> ArduinoTeal.copy(alpha = 0.15f)
-                    IdeWorkflowState.USB_PERMISSION_REQUIRED -> ArduinoAccentOrange.copy(alpha = 0.15f)
-                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            // Header
+            item {
                 Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val statusColor = when (workflowState) {
-                        IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen
-                        IdeWorkflowState.UPLOAD_FAILED, IdeWorkflowState.COMPILE_FAILED -> ArduinoAccentRed
-                        IdeWorkflowState.UPLOADING, IdeWorkflowState.COMPILING -> ArduinoTealLight
-                        IdeWorkflowState.USB_PERMISSION_REQUIRED -> ArduinoAccentOrange
-                        else -> ArduinoAccentYellow
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(10.dp)
-                            .clip(CircleShape)
-                            .background(statusColor)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = workflowState.title,
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = statusColor)
-                        )
-                        Text(
-                            text = workflowState.description,
-                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 1. Target Board Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = ArduinoTeal.copy(alpha = 0.15f),
-                            modifier = Modifier.size(38.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.DeveloperBoard, contentDescription = null, tint = ArduinoTealLight)
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Upload,
+                            contentDescription = null,
+                            tint = ArduinoTealLight,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = selectedBoard?.name ?: "No Board Selected",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                text = "Firmware Upload",
+                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
-                                text = "FQBN: ${selectedBoard?.fqbn ?: "None"} • MCU: ${selectedBoard?.mcu ?: "N/A"}",
-                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                text = "Compile, verify, and flash sketches over USB OTG",
+                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
                             )
                         }
                     }
 
-                    OutlinedButton(
-                        onClick = onChangeBoardClick,
-                        shape = RoundedCornerShape(8.dp)
+                    IconButton(
+                        onClick = onRefreshDevices,
+                        modifier = Modifier.testTag("refresh_usb_button")
                     ) {
-                        Text("Change", fontSize = 12.sp)
+                        Icon(Icons.Default.Refresh, contentDescription = "Scan USB Devices", tint = ArduinoTealLight)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 2. USB Device & Connection Status Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Usb, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
+            // 1. Target Board Card
+            item {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = "USB OTG Port & Device",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                text = "Board",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold
+                                )
                             )
+
+                            OutlinedButton(
+                                onClick = onChangeBoardClick,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("change_board_button")
+                            ) {
+                                Text("Change Board", fontSize = 12.sp)
+                            }
                         }
 
-                        // Connection Status Pill
-                        val isConnected = connectedDevices.isNotEmpty()
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (isConnected) ArduinoAccentGreen.copy(alpha = 0.15f) else ArduinoAccentRed.copy(alpha = 0.15f)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = ArduinoTeal.copy(alpha = 0.15f),
+                                modifier = Modifier.size(36.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .clip(CircleShape)
-                                        .background(if (isConnected) ArduinoAccentGreen else ArduinoAccentRed)
-                                )
-                                Spacer(modifier = Modifier.width(5.dp))
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.DeveloperBoard, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(20.dp))
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
                                 Text(
-                                    text = if (isConnected) "${connectedDevices.size} DEVICE(S)" else "DISCONNECTED",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = if (isConnected) ArduinoAccentGreen else ArduinoAccentRed,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 10.sp
+                                    text = selectedBoard?.name ?: "No Board Selected",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    text = selectedBoard?.fqbn ?: "esp32:esp32:esp32",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = ArduinoTealLight,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp
                                     )
                                 )
                             }
                         }
                     }
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+            // 2. USB OTG Card
+            item {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "USB OTG",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
 
-                    if (connectedDevices.isEmpty()) {
-                        Text(
-                            text = "No USB microcontroller detected. Plug in your ESP32 or Arduino via a USB-C or OTG adapter cable and tap Scan.",
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        )
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = onRefreshDevices,
+                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("scan_usb_button")
+                            ) {
+                                Icon(Icons.Default.Usb, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Scan USB", fontSize = 12.sp)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        if (connectedDevices.isEmpty()) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(ArduinoAccentYellow)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = "Disconnected",
+                                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold, color = ArduinoAccentYellow)
+                                    )
+                                    Text(
+                                        text = "No USB device detected. Connect ESP32 via USB OTG cable.",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                    )
+                                }
+                            }
+                        } else {
                             connectedDevices.forEach { devInfo ->
-                                val isSelected = selectedDevice?.device?.deviceId == devInfo.device.deviceId ||
-                                        (selectedDevice == null && connectedDevices.first() == devInfo)
-
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isSelected) ArduinoTeal.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onSelectDevice(devInfo) }
-                                        .border(
-                                            width = if (isSelected) 1.5.dp else 0.dp,
-                                            color = if (isSelected) ArduinoTealLight else Color.Transparent,
-                                            shape = RoundedCornerShape(8.dp)
-                                        )
-                                        .padding(10.dp)
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .clip(CircleShape)
+                                                .background(if (devInfo.hasPermission) ArduinoAccentGreen else ArduinoAccentOrange)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
                                             Text(
-                                                text = devInfo.description,
-                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                                text = "${devInfo.chipType.label} (VID: 0x${Integer.toHexString(devInfo.vendorId).uppercase()})",
+                                                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
                                             )
                                             Text(
-                                                text = "Chip: ${devInfo.chipType.label} • Port: ${devInfo.deviceName}",
+                                                text = if (devInfo.hasPermission) "Connected & Permission Granted" else "Permission Required",
                                                 style = MaterialTheme.typography.bodySmall.copy(
-                                                    color = ArduinoTealLight,
-                                                    fontWeight = FontWeight.Medium,
+                                                    color = if (devInfo.hasPermission) ArduinoAccentGreen else ArduinoAccentOrange,
                                                     fontSize = 11.sp
                                                 )
                                             )
-                                            Text(
-                                                text = "VID: 0x${Integer.toHexString(devInfo.vendorId).uppercase()} • PID: 0x${Integer.toHexString(devInfo.productId).uppercase()}",
-                                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            )
                                         }
+                                    }
 
-                                        if (!devInfo.hasPermission) {
-                                            Button(
-                                                onClick = { onRequestPermission(devInfo.device) },
-                                                shape = RoundedCornerShape(6.dp),
-                                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoAccentOrange)
-                                            ) {
-                                                Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text("Grant Permission", fontSize = 11.sp)
-                                            }
-                                        } else {
-                                            Surface(
-                                                shape = RoundedCornerShape(6.dp),
-                                                color = ArduinoAccentGreen.copy(alpha = 0.15f)
-                                            ) {
-                                                Text(
-                                                    text = "Authorized",
-                                                    style = MaterialTheme.typography.labelSmall.copy(color = ArduinoAccentGreen, fontWeight = FontWeight.Bold),
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                )
-                                            }
+                                    if (!devInfo.hasPermission) {
+                                        Button(
+                                            onClick = { onRequestPermission(devInfo.device) },
+                                            colors = ButtonDefaults.buttonColors(containerColor = ArduinoAccentOrange),
+                                            shape = RoundedCornerShape(6.dp)
+                                        ) {
+                                            Text("Grant Permission", fontSize = 11.sp)
                                         }
                                     }
                                 }
@@ -383,282 +357,552 @@ fun UploadScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 3. Firmware Compilation Status & Test Helpers
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        val hasFirmware = hasCompiledBinary || activeFirmwarePackage != null
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = if (hasFirmware) Icons.Default.CheckCircle else Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = if (hasFirmware) ArduinoAccentGreen else ArduinoAccentOrange,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (activeFirmwarePackage != null) "ESP32 Firmware Package Ready"
-                                else if (hasCompiledBinary) "Firmware Binary Ready"
-                                else "Compilation Required",
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (hasFirmware) ArduinoAccentGreen else ArduinoAccentOrange
+            // 3. Specific Error Differentiation Banners
+            when (workflowState) {
+                IdeWorkflowState.SYNTAX_ERROR -> {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = ArduinoAccentRed.copy(alpha = 0.12f))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Error, contentDescription = null, tint = ArduinoAccentRed, modifier = Modifier.size(20.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Compilation Halted: Syntax Error", fontWeight = FontWeight.Bold, color = ArduinoAccentRed)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Static syntax verification found errors in the sketch code. Review terminal logs for file and line details.",
+                                    style = MaterialTheme.typography.bodySmall
                                 )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(
+                                    onClick = { onNavigateToEditor?.invoke() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ArduinoAccentRed),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Code, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Go to Editor to Fix Errors", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                IdeWorkflowState.COMPILER_MISSING -> {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = ArduinoAccentYellow.copy(alpha = 0.12f))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Warning, contentDescription = null, tint = ArduinoAccentYellow, modifier = Modifier.size(20.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Compiler Toolchain Not Configured", fontWeight = FontWeight.Bold, color = ArduinoAccentYellow)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "To produce genuine ESP32 binaries (.bin), configure an Arduino CLI Build Server URL in Settings, or use Test Blink for immediate USB OTG testing.",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(
+                                        onClick = { onNavigateToSettings?.invoke() },
+                                        colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Open Settings", fontSize = 12.sp)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { onLoadSampleBlink(true) },
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("Load Test Blink", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                IdeWorkflowState.CORE_MISSING -> {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = ArduinoAccentRed.copy(alpha = 0.12f))
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Error, contentDescription = null, tint = ArduinoAccentRed, modifier = Modifier.size(20.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Platform Core Missing", fontWeight = FontWeight.Bold, color = ArduinoAccentRed)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "The target board's platform core is not installed. Open Boards Manager to download and install it.",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(
+                                    onClick = { onNavigateToBoards?.invoke() },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.DeveloperBoard, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Open Boards Manager", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                else -> {}
+            }
+
+            // 4. Build & Compile Action Card
+            item {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text(
+                            text = "Build",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Button(
+                            onClick = onVerifyClick,
+                            enabled = canCompile,
+                            colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("compile_button")
+                        ) {
+                            if (isCompiling) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = Color.White,
+                                    strokeWidth = 2.dp
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Compiling...", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            } else {
+                                Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Compile Sketch", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 5. Firmware Status & Flash Upload Card
+            item {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Firmware Flash",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = when {
+                                    isUploading -> ArduinoTeal.copy(alpha = 0.15f)
+                                    workflowState == IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen.copy(alpha = 0.15f)
+                                    hasFirmware -> ArduinoAccentGreen.copy(alpha = 0.15f)
+                                    else -> MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ) {
+                                Text(
+                                    text = when {
+                                        isUploading -> "Flashing: $uploadStage"
+                                        workflowState == IdeWorkflowState.UPLOAD_SUCCESS -> "Flash Succeeded"
+                                        hasFirmware -> "Ready to Flash"
+                                        else -> "Compilation Required"
+                                    },
+                                    color = when {
+                                        isUploading -> ArduinoTealLight
+                                        workflowState == IdeWorkflowState.UPLOAD_SUCCESS -> ArduinoAccentGreen
+                                        hasFirmware -> ArduinoAccentGreen
+                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        if (isUploading) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            LinearProgressIndicator(
+                                progress = { uploadProgress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(6.dp),
+                                color = ArduinoAccentGreen,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "$uploadStage (${(uploadProgress * 100).toInt()}%)",
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                             )
                         }
 
-                        // Fast helper buttons
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(
-                                onClick = { onLoadSampleBlink(isTargetEsp32) },
-                                shape = RoundedCornerShape(6.dp)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = { onStartUpload(activeDevice?.device) },
+                                enabled = canUpload,
+                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoAccentGreen),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("upload_flash_button")
                             ) {
-                                Text("Load Test Blink", fontSize = 11.sp)
+                                Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Flash Board", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            OutlinedButton(
+                                onClick = { showManualFlashDialog = true },
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("manual_flash_button")
+                            ) {
+                                Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Manual Flash", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6. Test Blink Card (Precompiled Genuine ESP32 Firmware)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Test Blink Firmware",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Text(
+                                    text = "Board: ESP32 Dev Module • Firmware: Precompiled (4 segments)",
+                                    style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                )
                             }
 
                             Button(
-                                onClick = onVerifyClick,
-                                shape = RoundedCornerShape(6.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal)
+                                onClick = { onLoadSampleBlink(true) },
+                                colors = ButtonDefaults.buttonColors(containerColor = ArduinoTealLight),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("load_test_blink_button")
                             ) {
-                                Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(12.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Verify/Compile", fontSize = 11.sp)
+                                Text("Load Test Blink", fontSize = 12.sp)
                             }
                         }
                     }
+                }
+            }
 
-                    if (activeFirmwarePackage != null) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = ArduinoTeal.copy(alpha = 0.08f),
-                            modifier = Modifier.fillMaxWidth()
+            // 7. Firmware Artifacts Breakdown Card
+            item {
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column(modifier = Modifier.padding(10.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            Icons.Default.Memory,
-                                            contentDescription = null,
-                                            tint = ArduinoTealLight,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "${activeFirmwarePackage.targetChip} • ${activeFirmwarePackage.formattedTotalSize} (${activeFirmwarePackage.binaries.size} segments)",
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontWeight = FontWeight.Bold,
-                                                color = ArduinoTealLight
-                                            )
-                                        )
-                                    }
+                            Text(
+                                text = "Firmware Package",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
 
-                                    if (onExportFirmwareZip != null) {
-                                        OutlinedButton(
-                                            onClick = onExportFirmwareZip,
-                                            shape = RoundedCornerShape(6.dp),
-                                            modifier = Modifier.height(28.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Default.Share,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(12.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text("Export ZIP", fontSize = 10.sp)
-                                        }
+                            if (activeFirmwarePackage != null && onExportFirmwareZip != null) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    OutlinedButton(
+                                        onClick = onExportFirmwareZip,
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Export ZIP", fontSize = 11.sp)
                                     }
                                 }
+                            }
+                        }
 
-                                Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                                activeFirmwarePackage.binaries.forEach { seg ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 2.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween
+                        if (activeFirmwarePackage == null) {
+                            Text(
+                                text = "No firmware generated yet. Compile your sketch or load Test Blink to inspect binary segments.",
+                                style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            )
+                        } else {
+                            Text(
+                                text = "Total Size: ${activeFirmwarePackage.formattedTotalSize} (${activeFirmwarePackage.binaries.size} partitions)",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold, color = ArduinoTealLight)
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            activeFirmwarePackage.binaries.forEach { bin ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = bin.filename,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
+                                        )
+                                        Text(
+                                            text = "Offset: ${bin.flashAddress} • SHA: ${bin.sha256.take(12)}...",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        )
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant
                                     ) {
                                         Text(
-                                            text = "${seg.flashAddress}: ${seg.filename}",
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 10.5.sp
-                                            )
-                                        )
-                                        Text(
-                                            text = "${seg.size} bytes",
-                                            style = MaterialTheme.typography.bodySmall.copy(
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontSize = 10.5.sp
-                                            )
+                                            text = "${bin.size} B",
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                         )
                                     }
                                 }
                             }
                         }
-                    } else if (!hasCompiledBinary) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "Upload is gated: You must compile your sketch first to generate a valid binary, or tap 'Load Test Blink' to test flasher hardware immediately.",
-                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
-                        )
                     }
                 }
             }
 
-            // ESP32 Manual Bootloader Hint if ESP32 selected
-            if (isTargetEsp32) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                    modifier = Modifier.fillMaxWidth()
+            // 8. Console & Log Viewer (Collapsible)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = TerminalBackground)
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Info, contentDescription = null, tint = ArduinoTealLight, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "ESP32 Tip: If auto-reset fails, hold BOOT (IO0), tap EN (RST) once, release BOOT, then tap Upload.",
-                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 4. Upload Progress Indicator
-            if (isUploading || uploadProgress > 0f) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = uploadStage.ifEmpty { "Uploading..." },
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold, color = ArduinoTealLight)
-                        )
-                        Text(
-                            text = "${(uploadProgress * 100).toInt()}%",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    LinearProgressIndicator(
-                        progress = { uploadProgress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = ArduinoTealLight,
-                        trackColor = ArduinoTealDark
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            // 5. Upload Terminal Output
-            Text(
-                text = "Upload Output & Handshake Logs",
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(TerminalBackground)
-                    .padding(10.dp)
-            ) {
-                if (uploadOutputLogs.isEmpty()) {
-                    Text(
-                        text = "Ready to upload. Ensure your board is connected via USB OTG and press 'Upload Firmware'.\n\nSupports ESP32 ROM bootloader (SLIP protocol) and Arduino AVR STK500v1.",
-                        color = TerminalText.copy(alpha = 0.6f),
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        items(uploadOutputLogs) { log ->
-                            val color = when (log.type) {
-                                TerminalLineType.ERROR -> TerminalError
-                                TerminalLineType.WARNING -> TerminalWarning
-                                TerminalLineType.SUCCESS -> TerminalSuccess
-                                TerminalLineType.INFO -> TerminalInfo
-                                TerminalLineType.STDOUT -> TerminalText
-                            }
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { isConsoleExpanded = !isConsoleExpanded },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = log.text,
-                                color = color,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                lineHeight = 15.sp
+                                text = "Console Logs (${uploadOutputLogs.size})",
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
                             )
+
+                            IconButton(
+                                onClick = { isConsoleExpanded = !isConsoleExpanded },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(
+                                    if (isConsoleExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    tint = Color.White
+                                )
+                            }
+                        }
+
+                        if (isConsoleExpanded) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LazyColumn(
+                                state = logsListState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                            ) {
+                                items(uploadOutputLogs) { line ->
+                                    Text(
+                                        text = line.text,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        color = when (line.type) {
+                                            TerminalLineType.ERROR -> TerminalError
+                                            TerminalLineType.WARNING -> TerminalWarning
+                                            TerminalLineType.SUCCESS -> TerminalSuccess
+                                            TerminalLineType.INFO -> TerminalInfo
+                                            else -> TerminalText
+                                        },
+                                        modifier = Modifier.padding(vertical = 1.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // 6. Action Buttons: Upload & Serial Monitor
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Button(
-                    onClick = {
-                        val activeDev = selectedDevice?.device ?: connectedDevices.firstOrNull()?.device
-                        onStartUpload(activeDev)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("start_upload_button"),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = ArduinoTeal),
-                    enabled = !isUploading
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isUploading) "Uploading..." else "Upload Firmware")
-                }
-
-                OutlinedButton(
-                    onClick = onOpenSerialMonitor,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_serial_monitor_button"),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(Icons.Default.SettingsInputAntenna, contentDescription = null, tint = ArduinoTealLight)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Serial Monitor")
-                }
+            // Bottom Spacing
+            item {
+                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
+
+    // Manual Flash Confirmation Dialog
+    if (showManualFlashDialog) {
+        ManualFlashDialog(
+            activeFirmwarePackage = activeFirmwarePackage,
+            onConfirmFlash = { pkg ->
+                onLoadManualFirmware?.invoke(pkg)
+                showManualFlashDialog = false
+                onStartUpload(activeDevice?.device)
+            },
+            onDismiss = { showManualFlashDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun ManualFlashDialog(
+    activeFirmwarePackage: FirmwarePackage?,
+    onConfirmFlash: (FirmwarePackage) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var confirmed by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Manual Firmware Flash") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Verify firmware partition offsets and SHA-256 before writing to ESP32 flash memory.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (activeFirmwarePackage != null) {
+                    Text(
+                        text = "Board: ${activeFirmwarePackage.boardName} (${activeFirmwarePackage.formattedTotalSize})",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, color = ArduinoTealLight)
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    LazyColumn(modifier = Modifier.height(140.dp)) {
+                        items(activeFirmwarePackage.binaries) { b ->
+                            Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                                Text(
+                                    text = "• ${b.filename} → ${b.flashAddress}",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "  Size: ${b.size} B | SHA: ${b.sha256.take(16)}...",
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "No active firmware package loaded. Tap 'Load Test Blink' first to load precompiled ESP32 Blink firmware.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = ArduinoAccentYellow
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (activeFirmwarePackage != null) {
+                        onConfirmFlash(activeFirmwarePackage)
+                    }
+                },
+                enabled = activeFirmwarePackage != null,
+                colors = ButtonDefaults.buttonColors(containerColor = ArduinoAccentGreen)
+            ) {
+                Text("Confirm & Flash")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }

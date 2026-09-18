@@ -119,6 +119,9 @@ fun MainScreen(
     val workflowState by viewModel.workflowState.collectAsState()
     val lastAttachedDevice by viewModel.lastAttachedDevice.collectAsState()
     val activeFirmwarePackage by viewModel.activeFirmwarePackage.collectAsState()
+    val boardPackageUrls by viewModel.boardPackageUrls.collectAsState(emptyList())
+    val esp32Platform by viewModel.esp32Platform.collectAsState()
+    val coreInstallProgress by viewModel.coreInstallProgress.collectAsState()
     val context = LocalContext.current
 
     val activeProject = allProjects.find { it.id == currentProjectId }
@@ -362,7 +365,11 @@ fun MainScreen(
                                     val shareIntent = viewModel.shareFirmwareZip(zipFile)
                                     context.startActivity(Intent.createChooser(shareIntent, "Share ESP32 Firmware Package"))
                                 }
-                            }
+                            },
+                            onNavigateToEditor = { viewModel.navigateTo(Screen.EDITOR) },
+                            onNavigateToSettings = { viewModel.navigateTo(Screen.SETTINGS) },
+                            onNavigateToBoards = { viewModel.navigateTo(Screen.BOARDS) },
+                            onLoadManualFirmware = { viewModel.setCustomFirmwarePackage(it) }
                         )
 
                         Screen.EDITOR -> EditorScreen(
@@ -408,8 +415,16 @@ fun MainScreen(
                         Screen.BOARDS -> BoardsManagerScreen(
                             boards = allBoards,
                             selectedBoard = selectedBoard,
+                            esp32Platform = esp32Platform,
+                            packageUrls = boardPackageUrls,
+                            installProgress = coreInstallProgress,
                             onSelectBoard = { viewModel.selectBoard(it) },
-                            onToggleInstall = { viewModel.toggleBoardInstall(it) }
+                            onToggleInstall = { viewModel.toggleBoardInstall(it) },
+                            onInstallEsp32Core = { viewModel.installEsp32Core(it) },
+                            onUninstallEsp32Core = { viewModel.uninstallEsp32Core() },
+                            onUpdateIndexes = { viewModel.updateBoardIndexes() },
+                            onAddPackageUrl = { viewModel.addBoardPackageUrl(it) },
+                            onRemovePackageUrl = { viewModel.removeBoardPackageUrl(it) }
                         )
 
                         Screen.LIBRARIES -> LibraryManagerScreen(
@@ -444,10 +459,15 @@ fun MainScreen(
 
                         Screen.SETTINGS -> SettingsScreen(
                             settings = settings,
+                            packageUrls = boardPackageUrls,
                             onUpdateSetting = { k, v -> viewModel.updateSetting(k, v) },
                             onTestBuildServer = { url -> viewModel.checkBuildServerHealth(url) },
                             onCheckLocalToolchain = { viewModel.checkLocalToolchain() },
-                            onClearCache = { viewModel.clearBuildCache() }
+                            onClearCache = { viewModel.clearBuildCache() },
+                            onAddPackageUrl = { viewModel.addBoardPackageUrl(it) },
+                            onRemovePackageUrl = { viewModel.removeBoardPackageUrl(it) },
+                            onUpdateIndexes = { viewModel.updateBoardIndexes() },
+                            onOpenBoardsManager = { viewModel.navigateTo(Screen.BOARDS) }
                         )
                     }
                 }

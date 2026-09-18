@@ -645,6 +645,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         repository.usbHardwareManager.clearMessages()
     }
 
+    // Board Manager
+    val boardPackageUrls = repository.boardPackageUrls
+    val esp32Platform = repository.esp32Platform
+    val coreInstallProgress = repository.coreInstallProgress
+
+    fun addBoardPackageUrl(url: String) {
+        viewModelScope.launch {
+            repository.addBoardPackageUrl(url)
+        }
+    }
+
+    fun removeBoardPackageUrl(url: String) {
+        viewModelScope.launch {
+            repository.removeBoardPackageUrl(url)
+        }
+    }
+
+    fun updateBoardIndexes() {
+        viewModelScope.launch {
+            repository.updateBoardIndexes()
+        }
+    }
+
+    fun installEsp32Core(version: String) {
+        viewModelScope.launch {
+            repository.installEsp32Core(version).collect {
+                // Tracked via coreInstallProgress and terminal logs
+            }
+        }
+    }
+
+    fun uninstallEsp32Core() {
+        viewModelScope.launch {
+            repository.uninstallEsp32Core()
+        }
+    }
+
     // Settings
     fun updateSetting(key: String, value: String) {
         viewModelScope.launch {

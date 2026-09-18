@@ -28,6 +28,7 @@ import com.example.data.usb.UsbHardwareManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -96,6 +97,29 @@ class AppRepository(
         private set
 
     val firmwareManager = FirmwareManager(context)
+    val boardManagerService = com.example.boards.BoardManagerService(context, boardDao, settingDao)
+
+    private val _boardPackageUrls = MutableStateFlow<List<String>>(com.example.boards.BoardManagerService.DEFAULT_PACKAGE_URLS)
+    val boardPackageUrls: StateFlow<List<String>> = _boardPackageUrls.asStateFlow()
+
+    private val _esp32Platform = MutableStateFlow<com.example.boards.PlatformPackage>(
+        com.example.boards.PlatformPackage(
+            id = "esp32",
+            name = "esp32",
+            maintainer = "Espressif Systems",
+            websiteUrl = "https://github.com/espressif/arduino-esp32",
+            category = "ESP32",
+            availableVersions = com.example.boards.BoardManagerService.DEFAULT_ESP32_VERSIONS,
+            installedVersion = "3.1.1",
+            isInstalled = true,
+            description = "Official Arduino core for Espressif ESP32, ESP32-S2, ESP32-S3, ESP32-C3, and ESP32-C6 microcontrollers.",
+            toolsDependencies = listOf("xtensa-esp32-elf-gcc", "riscv32-esp-elf-gcc", "esptool_py")
+        )
+    )
+    val esp32Platform: StateFlow<com.example.boards.PlatformPackage> = _esp32Platform.asStateFlow()
+
+    private val _coreInstallProgress = MutableStateFlow<com.example.boards.CoreInstallProgress?>(null)
+    val coreInstallProgress: StateFlow<com.example.boards.CoreInstallProgress?> = _coreInstallProgress.asStateFlow()
 
     private val _activeFirmwarePackage = MutableStateFlow<FirmwarePackage?>(null)
     val activeFirmwarePackage: StateFlow<FirmwarePackage?> = _activeFirmwarePackage.asStateFlow()
@@ -387,6 +411,7 @@ void loop() {
         scope.launch {
             val installedLibs = libraryDao.getInstalledLibraries().firstOrNull() ?: emptyList()
             val remoteUrl = settingDao.getSettingDirect("compiler_remote_url") ?: ""
+            val backend = settingDao.getSettingDirect("compiler_backend") ?: "server"
             val isVerbose = (settingDao.getSettingDirect("compiler_verbose") ?: "true").toBoolean()
 
             compilerService.compileSketch(
@@ -395,6 +420,7 @@ void loop() {
                 targetBoard = board,
                 installedLibraries = installedLibs,
                 remoteCompilerUrl = remoteUrl,
+                compilerBackend = backend,
                 verboseOutput = isVerbose
             ).collect { progress ->
                 _compileProgress.value = progress.progress
@@ -406,11 +432,16 @@ void loop() {
                     if (progress.isSuccess) {
                         lastCompiledBinary = progress.binaryBytes
                         _activeFirmwarePackage.value = progress.firmwarePackage
-                        _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
+                        _workflowState.value = if (progress.firmwarePackage != null) IdeWorkflowState.FIRMWARE_READY else IdeWorkflowState.COMPILE_SUCCESS
                     } else {
                         lastCompiledBinary = null
                         _activeFirmwarePackage.value = null
-                        _workflowState.value = IdeWorkflowState.COMPILE_FAILED
+                        _workflowState.value = when {
+                            progress.isSyntaxError -> IdeWorkflowState.SYNTAX_ERROR
+                            progress.isToolchainMissing -> IdeWorkflowState.COMPILER_MISSING
+                            progress.isCoreMissing -> IdeWorkflowState.CORE_MISSING
+                            else -> IdeWorkflowState.COMPILE_FAILED
+                        }
                     }
                 }
             }
@@ -541,7 +572,58 @@ void loop() {
         _activeFirmwarePackage.value = pkg
         lastCompiledBinary = pkg.binaries.find { it.filename.contains("firmware", ignoreCase = true) }?.data
             ?: pkg.binaries.firstOrNull()?.data
-        _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
+        _workflowState.value = IdeWorkflowState.FIRMWARE_READY
+        addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, "Manual firmware package loaded: ${pkg.boardName} (${pkg.formattedTotalSize})"))
+        for (b in pkg.binaries) {
+            addTerminalLine(TerminalLine(TerminalLineType.INFO, "  • ${b.flashAddress}: ${b.filename} (${b.size} bytes, SHA: ${b.sha256.take(8)}...)"))
+        }
+    }
+
+    suspend fun refreshBoardManagerState() {
+        _boardPackageUrls.value = boardManagerService.getPackageUrls()
+        _esp32Platform.value = boardManagerService.getEsp32PlatformPackage()
+    }
+
+    suspend fun addBoardPackageUrl(url: String) {
+        boardManagerService.addPackageUrl(url)
+        refreshBoardManagerState()
+    }
+
+    suspend fun removeBoardPackageUrl(url: String) {
+        boardManagerService.removePackageUrl(url)
+        refreshBoardManagerState()
+    }
+
+    suspend fun updateBoardIndexes() {
+        boardManagerService.updatePackageIndexes().collect { progress ->
+            _coreInstallProgress.value = progress
+            if (progress.terminalLine != null) {
+                addTerminalLine(progress.terminalLine)
+            }
+            if (progress.isFinished) {
+                refreshBoardManagerState()
+            }
+        }
+    }
+
+    fun installEsp32Core(version: String): Flow<com.example.boards.CoreInstallProgress> = flow {
+        val serverUrl = settingDao.getSettingDirect("compiler_remote_url")
+        boardManagerService.installEsp32Platform(version, serverUrl).collect { progress ->
+            _coreInstallProgress.value = progress
+            if (progress.terminalLine != null) {
+                addTerminalLine(progress.terminalLine)
+            }
+            emit(progress)
+            if (progress.isFinished) {
+                refreshBoardManagerState()
+            }
+        }
+    }
+
+    suspend fun uninstallEsp32Core() {
+        boardManagerService.uninstallEsp32Platform()
+        refreshBoardManagerState()
+        addTerminalLine(TerminalLine(TerminalLineType.WARNING, "ESP32 platform core uninstalled."))
     }
 
     // Settings
