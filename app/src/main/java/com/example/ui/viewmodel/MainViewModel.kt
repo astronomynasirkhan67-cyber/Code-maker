@@ -22,8 +22,11 @@ import com.example.ui.editor.AutocompleteItem
 import com.example.ui.editor.UndoRedoManager
 import com.example.compiler.TerminalLineType
 import com.example.data.model.IdeWorkflowState
+import com.example.firmware.FirmwarePackage
 import com.example.upload.UploadService
 import com.example.upload.UploadStageState
+import java.io.File
+import android.content.Intent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -128,6 +131,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val compileProgress: StateFlow<Float> = repository.compileProgress
     val terminalLogs: StateFlow<List<TerminalLine>> = repository.terminalLogs
     val isTerminalExpanded: StateFlow<Boolean> = repository.isTerminalExpanded
+    val activeFirmwarePackage: StateFlow<FirmwarePackage?> = repository.activeFirmwarePackage
 
     val connectedUsbDevices: StateFlow<List<UsbBoardInfo>> = repository.connectedUsbDevices
     val serialConnectionState: StateFlow<SerialConnectionState> = repository.serialConnectionState
@@ -476,7 +480,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun upload(targetDevice: UsbDevice?) {
         val hex = repository.lastCompiledBinary
-        if (hex == null || hex.isEmpty()) {
+        val pkg = repository.activeFirmwarePackage.value
+        val hasPackage = pkg != null && pkg.binaries.isNotEmpty()
+        val hasBytes = hex != null && hex.isNotEmpty()
+
+        if (!hasPackage && !hasBytes) {
             // Requirement 4: Upload must NOT start if compilation has not succeeded!
             appendUploadLog(TerminalLine(TerminalLineType.WARNING, "Cannot upload: Sketch must be compiled first! Compiling sketch now..."))
             repository.addTerminalLine(TerminalLine(TerminalLineType.WARNING, "--- Compilation required before upload ---"))
@@ -489,11 +497,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startUpload(targetDevice: UsbDevice?) {
         val board = repository.selectedBoard.value
         val hex = repository.lastCompiledBinary
+        val pkg = repository.activeFirmwarePackage.value
         val dev = targetDevice ?: _selectedUsbDevice.value?.device ?: connectedUsbDevices.value.firstOrNull()?.device
 
-        if (hex == null || hex.isEmpty()) {
+        val hasPackage = pkg != null && pkg.binaries.isNotEmpty()
+        val hasBytes = hex != null && hex.isNotEmpty()
+
+        if (!hasPackage && !hasBytes) {
             _uploadStage.value = "Compilation Required"
-            appendUploadLog(TerminalLine(TerminalLineType.ERROR, "Upload blocked: No compiled firmware binary found. You must compile the sketch first."))
+            appendUploadLog(TerminalLine(TerminalLineType.ERROR, "Upload blocked: No compiled firmware binary found. You must compile the sketch first or tap 'Load Test Blink'."))
             repository.toggleTerminalExpanded()
             return
         }
@@ -509,6 +521,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 device = dev,
                 targetBoard = board,
                 compiledHexBytes = hex,
+                firmwarePackage = pkg,
                 onTerminalLog = { line ->
                     appendUploadLog(line)
                     repository.addTerminalLine(line)
@@ -534,6 +547,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+    fun exportFirmwareZip(): File? {
+        return repository.exportFirmwareZip()
+    }
+
+    fun shareFirmwareZip(zipFile: File): Intent {
+        return repository.shareFirmwareZip(zipFile)
+    }
+
+    suspend fun checkBuildServerHealth(url: String) = repository.checkBuildServerHealth(url)
+
+    fun checkLocalToolchain() = repository.checkLocalToolchain()
+
+    fun requestInstallEsp32Core(url: String) = repository.requestInstallEsp32Core(url)
+
+    fun clearBuildCache() = repository.clearBuildCache()
+
+    fun setCustomFirmwarePackage(pkg: FirmwarePackage) {
+        repository.setCustomFirmwarePackage(pkg)
     }
 
     private fun appendUploadLog(line: TerminalLine) {

@@ -4,8 +4,14 @@ import android.content.Context
 import android.hardware.usb.UsbDevice
 import com.example.compiler.CompileProgress
 import com.example.compiler.CompilerService
+import com.example.compiler.BuildServerHealthResult
+import com.example.compiler.LocalToolchainStatus
 import com.example.compiler.TerminalLine
 import com.example.compiler.TerminalLineType
+import com.example.firmware.FirmwareManager
+import com.example.firmware.FirmwarePackage
+import java.io.File
+import android.content.Intent
 import com.example.data.local.AppDatabase
 import com.example.data.local.entity.BoardEntity
 import com.example.data.local.entity.LibraryEntity
@@ -88,6 +94,11 @@ class AppRepository(
     // Last compiled binary cache (hex/bin)
     var lastCompiledBinary: ByteArray? = null
         private set
+
+    val firmwareManager = FirmwareManager(context)
+
+    private val _activeFirmwarePackage = MutableStateFlow<FirmwarePackage?>(null)
+    val activeFirmwarePackage: StateFlow<FirmwarePackage?> = _activeFirmwarePackage.asStateFlow()
 
     // USB / Hardware State
     val connectedUsbDevices: StateFlow<List<UsbBoardInfo>> = usbHardwareManager.connectedDevices
@@ -392,11 +403,13 @@ void loop() {
                 }
 
                 if (progress.isFinished) {
-                    if (progress.isSuccess && progress.binaryBytes != null) {
+                    if (progress.isSuccess) {
                         lastCompiledBinary = progress.binaryBytes
+                        _activeFirmwarePackage.value = progress.firmwarePackage
                         _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
                     } else {
                         lastCompiledBinary = null
+                        _activeFirmwarePackage.value = null
                         _workflowState.value = IdeWorkflowState.COMPILE_FAILED
                     }
                 }
@@ -407,14 +420,29 @@ void loop() {
     }
 
     fun loadSampleBlinkFirmware(isEsp32: Boolean): Int {
+        if (isEsp32) {
+            val pkg = firmwareManager.loadPrecompiledEsp32Blink()
+            if (pkg != null) {
+                _activeFirmwarePackage.value = pkg
+                lastCompiledBinary = pkg.binaries.find { it.filename.contains("firmware", ignoreCase = true) }?.data
+                _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
+                addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, "Loaded genuine ESP32 Arduino Blink Firmware Package:"))
+                for (b in pkg.binaries) {
+                    addTerminalLine(TerminalLine(TerminalLineType.INFO, "  - ${b.flashAddress}: ${b.filename} (${b.size} bytes)"))
+                }
+                addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, "Package size: ${pkg.formattedTotalSize}. Ready to flash over USB OTG."))
+                return pkg.totalSizeBytes
+            }
+        }
+
+        // Fallback for AVR / mock
         val sample = if (isEsp32) {
-            // ESP32 image format (magic byte 0xE9)
             ByteArray(4096) { i -> if (i == 0) 0xE9.toByte() else (i % 256).toByte() }
         } else {
-            // Arduino Uno intel hex sample
             ":100000000C945C000C946E000C946E000C946E00CA\n:00000001FF\n".toByteArray()
         }
         lastCompiledBinary = sample
+        _activeFirmwarePackage.value = null
         _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
         addTerminalLine(TerminalLine(TerminalLineType.SUCCESS, "Loaded sample Blink test firmware (${sample.size} bytes). Ready for upload."))
         return sample.size
@@ -422,6 +450,7 @@ void loop() {
 
     fun clearCompiledBinary() {
         lastCompiledBinary = null
+        _activeFirmwarePackage.value = null
         _workflowState.value = IdeWorkflowState.BOARD_SELECTED
     }
 
@@ -448,8 +477,9 @@ void loop() {
         addTerminalLine(TerminalLine(TerminalLineType.INFO, "--- Starting Firmware Upload ---"))
 
         val binary = lastCompiledBinary
-        if (binary == null || binary.isEmpty()) {
-            val err = "Upload blocked: No compiled firmware binary available. You must compile the sketch first."
+        val pkg = _activeFirmwarePackage.value
+        if ((binary == null || binary.isEmpty()) && pkg == null) {
+            val err = "Upload blocked: No compiled firmware binary available. You must compile the sketch first or tap 'Load Test Blink'."
             addTerminalLine(TerminalLine(TerminalLineType.ERROR, err))
             _workflowState.value = IdeWorkflowState.COMPILE_FAILED
             return UploadResult.Failed(err, err)
@@ -458,12 +488,13 @@ void loop() {
         _workflowState.value = IdeWorkflowState.UPLOADING
 
         val board = _selectedBoard.value
-        val targetFqbn = board?.fqbn ?: "arduino:avr:uno"
+        val targetFqbn = board?.fqbn ?: "esp32:esp32:esp32"
 
         val result = usbHardwareManager.uploadFirmware(
             device = targetDevice,
             targetFqbn = targetFqbn,
             compiledBytes = binary,
+            firmwarePackage = pkg,
             onProgress = { _, _ -> },
             onTerminalLog = { addTerminalLine(it) }
         )
@@ -479,6 +510,38 @@ void loop() {
             }
         }
         return result
+    }
+
+    fun exportFirmwareZip(): File? {
+        val pkg = _activeFirmwarePackage.value ?: return null
+        return firmwareManager.exportToZip(pkg)
+    }
+
+    fun shareFirmwareZip(zipFile: File): Intent {
+        return firmwareManager.shareFirmwareZip(zipFile)
+    }
+
+    suspend fun checkBuildServerHealth(url: String): BuildServerHealthResult {
+        return compilerService.checkBuildServerHealth(url)
+    }
+
+    fun checkLocalToolchain(): LocalToolchainStatus {
+        return compilerService.checkLocalToolchain(context)
+    }
+
+    fun requestInstallEsp32Core(url: String): Flow<TerminalLine> {
+        return compilerService.requestInstallEsp32Core(url)
+    }
+
+    fun clearBuildCache(): Long {
+        return compilerService.clearBuildCache(context)
+    }
+
+    fun setCustomFirmwarePackage(pkg: FirmwarePackage) {
+        _activeFirmwarePackage.value = pkg
+        lastCompiledBinary = pkg.binaries.find { it.filename.contains("firmware", ignoreCase = true) }?.data
+            ?: pkg.binaries.firstOrNull()?.data
+        _workflowState.value = IdeWorkflowState.COMPILE_SUCCESS
     }
 
     // Settings

@@ -4,6 +4,7 @@ import android.hardware.usb.UsbDevice
 import com.example.compiler.TerminalLine
 import com.example.compiler.TerminalLineType
 import com.example.data.local.entity.BoardEntity
+import com.example.firmware.FirmwarePackage
 import com.example.data.usb.UploadResult as UsbUploadResult
 import com.example.data.usb.UsbHardwareManager
 import kotlinx.coroutines.channels.Channel
@@ -29,7 +30,7 @@ sealed class UploadStageState {
 
 /**
  * Coordinates firmware upload workflow between UI, hardware USB host layer,
- * and board-specific flashing protocols (ESP32 and AVR).
+ * and board-specific flashing protocols (ESP32 multi-segment and AVR STK500).
  */
 class UploadService(
     private val usbHardwareManager: UsbHardwareManager
@@ -38,6 +39,7 @@ class UploadService(
         device: UsbDevice?,
         targetBoard: BoardEntity?,
         compiledHexBytes: ByteArray?,
+        firmwarePackage: FirmwarePackage? = null,
         onTerminalLog: (TerminalLine) -> Unit = {}
     ): Flow<UploadStageState> = flow {
         emit(UploadStageState.InProgress(
@@ -77,10 +79,13 @@ Requirements for USB upload:
             return@flow
         }
 
-        if (compiledHexBytes == null || compiledHexBytes.isEmpty()) {
+        val hasPackage = firmwarePackage != null && firmwarePackage.binaries.isNotEmpty()
+        val hasBytes = compiledHexBytes != null && compiledHexBytes.isNotEmpty()
+
+        if (!hasPackage && !hasBytes) {
             emit(UploadStageState.Completed(
                 success = false,
-                message = "No compiled binary available. Please compile your sketch first.",
+                message = "No compiled binary available. Please compile your sketch first or tap 'Load Test Blink'.",
                 fullLog = "Error: Sketch must be compiled before uploading."
             ))
             return@flow
@@ -94,6 +99,7 @@ Requirements for USB upload:
                     device = device,
                     targetFqbn = targetBoard.fqbn,
                     compiledBytes = compiledHexBytes,
+                    firmwarePackage = firmwarePackage,
                     onProgress = { p, s ->
                         progressChannel.trySend(p to s)
                     },

@@ -1,9 +1,12 @@
 package com.example.compiler
 
+import android.content.Context
 import android.util.Base64
 import com.example.data.local.entity.BoardEntity
 import com.example.data.local.entity.LibraryEntity
 import com.example.data.local.entity.ProjectFileEntity
+import com.example.firmware.FirmwareBinary
+import com.example.firmware.FirmwarePackage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -15,6 +18,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 
@@ -40,21 +44,229 @@ data class CompileProgress(
     val isFinished: Boolean = false,
     val isSuccess: Boolean = false,
     val isToolchainMissing: Boolean = false,
-    val binaryBytes: ByteArray? = null
+    val binaryBytes: ByteArray? = null,
+    val firmwarePackage: FirmwarePackage? = null
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as CompileProgress
+        if (stage != other.stage) return false
+        if (progress != other.progress) return false
+        if (line != other.line) return false
+        if (isFinished != other.isFinished) return false
+        if (isSuccess != other.isSuccess) return false
+        if (isToolchainMissing != other.isToolchainMissing) return false
+        if (binaryBytes != null) {
+            if (other.binaryBytes == null) return false
+            if (!binaryBytes.contentEquals(other.binaryBytes)) return false
+        } else if (other.binaryBytes != null) return false
+        return firmwarePackage == other.firmwarePackage
+    }
+
+    override fun hashCode(): Int {
+        var result = stage.hashCode()
+        result = 31 * result + progress.hashCode()
+        result = 31 * result + (line?.hashCode() ?: 0)
+        result = 31 * result + isFinished.hashCode()
+        result = 31 * result + isSuccess.hashCode()
+        result = 31 * result + isToolchainMissing.hashCode()
+        result = 31 * result + (binaryBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (firmwarePackage?.hashCode() ?: 0)
+        return result
+    }
+}
+
+data class BuildServerHealthResult(
+    val isOnline: Boolean,
+    val latencyMs: Long = 0,
+    val serverName: String = "",
+    val arduinoCliVersion: String = "Unknown",
+    val esp32CoreVersion: String = "Not Installed",
+    val message: String = "",
+    val platforms: List<String> = emptyList()
+) {
+    val isHealthy: Boolean get() = isOnline
+    val installedPlatforms: List<String>
+        get() = if (platforms.isNotEmpty()) platforms
+        else if (esp32CoreVersion != "Not Installed") listOf("esp32:esp32@$esp32CoreVersion")
+        else emptyList()
+}
+
+data class LocalToolchainStatus(
+    val isAvailable: Boolean,
+    val toolchainPath: String? = null,
+    val gccVersion: String? = null,
+    val message: String,
+    val cpuAbi: String = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a",
+    val androidApi: Int = android.os.Build.VERSION.SDK_INT,
+    val internalStorageFreeBytes: Long = 1024L * 1024L * 512L // Default estimate or calculated dynamically
 )
 
 /**
- * Modular compiler service interface supporting both local static syntax checking
- * and remote/local Arduino-CLI build daemon compilation.
- * Never reports fake successful compilation without a real binary and compiler run.
+ * Robust compiler pipeline implementing real Arduino & ESP32 compilation architectures.
+ * Distinguishes static syntax analysis from true toolchain binary generation.
+ * Supports local toolchain check, remote Arduino CLI compilation daemons, and complete ESP32 binary packages.
  */
 class CompilerService(
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .build()
 ) {
 
+    /**
+     * Checks if a local native xtensa/avr toolchain binary is installed in app data.
+     */
+    fun checkLocalToolchain(context: Context): LocalToolchainStatus {
+        val possiblePaths = listOf(
+            File(context.filesDir, "bin/xtensa-esp32-elf-gcc"),
+            File(context.filesDir, "toolchain/bin/xtensa-esp32-elf-gcc"),
+            File("/data/data/com.termux/files/usr/bin/xtensa-esp32-elf-gcc"),
+            File("/system/bin/xtensa-esp32-elf-gcc")
+        )
+
+        val found = possiblePaths.find { it.exists() && it.canExecute() }
+        return if (found != null) {
+            LocalToolchainStatus(
+                isAvailable = true,
+                toolchainPath = found.absolutePath,
+                gccVersion = "Xtensa ESP32 ELF GCC (Local)",
+                message = "Local Xtensa toolchain detected at ${found.absolutePath}"
+            )
+        } else {
+            LocalToolchainStatus(
+                isAvailable = false,
+                toolchainPath = null,
+                message = "Local cross-compiler (xtensa-esp32-elf-gcc) is not installed on this Android device."
+            )
+        }
+    }
+
+    /**
+     * Clears cached build files and compiler temporary artifacts.
+     */
+    fun clearBuildCache(context: Context): Long {
+        var bytesFreed = 0L
+        val cacheDirs = listOf(
+            File(context.cacheDir, "compiler_cache"),
+            File(context.cacheDir, "firmware"),
+            File(context.cacheDir, "downloads")
+        )
+
+        for (dir in cacheDirs) {
+            if (dir.exists()) {
+                dir.walkBottomUp().forEach { file ->
+                    val len = file.length()
+                    if (file.delete()) {
+                        bytesFreed += len
+                    }
+                }
+            }
+        }
+        return bytesFreed
+    }
+
+    /**
+     * Pings the Arduino CLI Build Server and retrieves version, cores, and status.
+     */
+    suspend fun checkBuildServerHealth(baseUrl: String): BuildServerHealthResult {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isEmpty()) {
+            return BuildServerHealthResult(
+                isOnline = false,
+                message = "Build Server URL is empty. Configure a server in Settings."
+            )
+        }
+
+        val url = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+        val startTime = System.currentTimeMillis()
+
+        return try {
+            val healthReq = Request.Builder()
+                .url("${url}health")
+                .get()
+                .build()
+
+            val response = client.newCall(healthReq).execute()
+            val latency = System.currentTimeMillis() - startTime
+            val body = response.body?.string() ?: ""
+
+            if (response.isSuccessful) {
+                var cliVer = "1.1.0"
+                var esp32Core = "3.1.1"
+                var sName = "Arduino CLI Daemon"
+
+                try {
+                    val json = JSONObject(body)
+                    cliVer = json.optString("arduinoCliVersion", json.optString("cli_version", "1.1.0"))
+                    esp32Core = json.optString("esp32CoreVersion", json.optString("core_version", "3.1.1"))
+                    sName = json.optString("server", "Arduino CLI Build Daemon")
+                } catch (_: Exception) {}
+
+                BuildServerHealthResult(
+                    isOnline = true,
+                    latencyMs = latency,
+                    serverName = sName,
+                    arduinoCliVersion = cliVer,
+                    esp32CoreVersion = esp32Core,
+                    message = "Connected to $sName (${latency}ms). Arduino CLI $cliVer, ESP32 Core $esp32Core."
+                )
+            } else {
+                BuildServerHealthResult(
+                    isOnline = false,
+                    latencyMs = latency,
+                    message = "Server returned HTTP ${response.code}: $body"
+                )
+            }
+        } catch (e: Exception) {
+            BuildServerHealthResult(
+                isOnline = false,
+                message = "Connection failed: ${e.message ?: "Unable to reach build server"}"
+            )
+        }
+    }
+
+    /**
+     * Requests the build server to install/update the ESP32 core via `arduino-cli core install esp32:esp32`.
+     */
+    fun requestInstallEsp32Core(baseUrl: String): Flow<TerminalLine> = flow {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isEmpty()) {
+            emit(TerminalLine(TerminalLineType.ERROR, "Cannot install core: Build Server URL is empty."))
+            return@flow
+        }
+
+        val url = if (trimmed.endsWith("/")) trimmed else "$trimmed/"
+        emit(TerminalLine(TerminalLineType.INFO, "Contacting Build Server at $url to install ESP32 Arduino Core..."))
+
+        try {
+            val payload = JSONObject().apply {
+                put("command", "core install esp32:esp32")
+                put("core", "esp32:esp32")
+            }
+            val req = Request.Builder()
+                .url("${url}core/install")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (resp.isSuccessful) {
+                emit(TerminalLine(TerminalLineType.SUCCESS, "ESP32 Core installed successfully on Build Server!"))
+                emit(TerminalLine(TerminalLineType.INFO, body))
+            } else {
+                emit(TerminalLine(TerminalLineType.ERROR, "Core install request failed (HTTP ${resp.code}): $body"))
+            }
+        } catch (e: Exception) {
+            emit(TerminalLine(TerminalLineType.ERROR, "Failed to trigger core installation: ${e.message}"))
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Complete sketch compilation workflow.
+     */
     fun compileSketch(
         projectName: String,
         files: List<ProjectFileEntity>,
@@ -68,7 +280,7 @@ class CompilerService(
 
         emit(CompileProgress("Initializing", 0.05f, TerminalLine(
             TerminalLineType.INFO,
-            "[Mobile Arduino IDE Compiler v1.3]"
+            "[Mobile Arduino IDE Compiler Pipeline v2.0]"
         )))
         emit(CompileProgress("Target Setup", 0.10f, TerminalLine(
             TerminalLineType.INFO,
@@ -76,7 +288,7 @@ class CompilerService(
         )))
         emit(CompileProgress("Source Check", 0.15f, TerminalLine(
             TerminalLineType.INFO,
-            "Processing sketch: $projectName (${files.size} source file(s))..."
+            "Compiling sketch: $projectName (${files.size} source file(s))..."
         )))
 
         delay(80)
@@ -84,7 +296,7 @@ class CompilerService(
         // Step 1: Real Static Syntax & Structure Verification
         emit(CompileProgress("Syntax Verification", 0.25f, TerminalLine(
             TerminalLineType.INFO,
-            "Analyzing C++ syntax and Arduino structure..."
+            "Running C++ static syntax verification..."
         )))
 
         val collectedErrors = mutableListOf<TerminalLine>()
@@ -101,7 +313,7 @@ class CompilerService(
             return@flow
         }
 
-        // Analyze every source file
+        // Analyze each source file
         for (file in files) {
             val lines = file.content.lines()
 
@@ -113,7 +325,7 @@ class CompilerService(
             var foundLoop = false
 
             val installedHeaders = installedLibraries.map { it.headerToInclude.lowercase() }.toSet() +
-                    setOf("arduino.h", "stdint.h", "stdbool.h", "math.h", "string.h", "stdlib.h", "wifi.h", "wire.h", "spi.h")
+                    setOf("arduino.h", "stdint.h", "stdbool.h", "math.h", "string.h", "stdlib.h", "wifi.h", "wire.h", "spi.h", "bluetoothserial.h")
 
             for ((index, rawLine) in lines.withIndex()) {
                 val lineNum = index + 1
@@ -247,7 +459,7 @@ class CompilerService(
                 progress = 1.0f,
                 line = TerminalLine(
                     TerminalLineType.ERROR,
-                    "Compilation halted: ${collectedErrors.size} error(s) found. Fix errors to continue."
+                    "Compilation halted: ${collectedErrors.size} syntax error(s) found. Fix errors to continue."
                 ),
                 isFinished = true,
                 isSuccess = false
@@ -255,24 +467,26 @@ class CompilerService(
             return@flow
         }
 
-        emit(CompileProgress("Syntax Passed", 0.70f, TerminalLine(
+        emit(CompileProgress("Syntax Verified", 0.65f, TerminalLine(
             TerminalLineType.SUCCESS,
-            "Static syntax check passed: 0 syntax errors detected."
+            "Static syntax check passed: 0 errors detected. Proceeding to toolchain compiler..."
         )))
 
         delay(100)
 
-        // Step 2: Build Backend Execution
+        // Step 2: Toolchain Compilation
         val cleanUrl = remoteCompilerUrl.trim()
         if (cleanUrl.isNotEmpty()) {
-            emit(CompileProgress("Build Server", 0.75f, TerminalLine(
+            emit(CompileProgress("Build Server Execution", 0.70f, TerminalLine(
                 TerminalLineType.INFO,
-                "Submitting to build backend: $cleanUrl"
+                "Submitting to Arduino CLI Build Server: $cleanUrl"
             )))
 
             try {
                 val payloadJson = JSONObject().apply {
                     put("fqbn", targetBoard.fqbn)
+                    put("projectName", projectName)
+                    put("verbose", verboseOutput)
                     val filesArray = JSONArray()
                     files.forEach { file ->
                         filesArray.put(JSONObject().apply {
@@ -283,8 +497,9 @@ class CompilerService(
                     put("files", filesArray)
                 }
 
+                val compileEndpoint = if (cleanUrl.endsWith("/")) "${cleanUrl}compile" else "$cleanUrl/compile"
                 val request = Request.Builder()
-                    .url(if (cleanUrl.endsWith("/")) "${cleanUrl}compile" else "$cleanUrl/compile")
+                    .url(compileEndpoint)
                     .post(payloadJson.toString().toRequestBody("application/json".toMediaType()))
                     .build()
 
@@ -292,18 +507,60 @@ class CompilerService(
                 val responseBody = response.body?.string() ?: ""
 
                 if (response.isSuccessful) {
-                    // Check if JSON response contains binary payload
-                    var binaryData: ByteArray? = null
-                    try {
-                        val json = JSONObject(responseBody)
-                        if (json.has("binary")) {
-                            val b64 = json.getString("binary")
-                            binaryData = Base64.decode(b64, Base64.DEFAULT)
-                        } else if (json.has("hex")) {
-                            binaryData = json.getString("hex").toByteArray()
+                    val json = try {
+                        JSONObject(responseBody)
+                    } catch (e: Exception) {
+                        null
+                    }
+
+                    // Print compiler stdout logs if present
+                    val compilerLogs = json?.optJSONArray("logs")
+                    if (compilerLogs != null) {
+                        for (i in 0 until compilerLogs.length()) {
+                            val logLine = compilerLogs.getString(i)
+                            emit(CompileProgress("Compiling", 0.85f, TerminalLine(TerminalLineType.STDOUT, logLine)))
                         }
-                    } catch (_: Exception) {
-                        binaryData = responseBody.toByteArray()
+                    }
+
+                    val binariesList = mutableListOf<FirmwareBinary>()
+
+                    if (json != null && json.has("binaries")) {
+                        val arr = json.getJSONArray("binaries")
+                        for (i in 0 until arr.length()) {
+                            val bObj = arr.getJSONObject(i)
+                            val fName = bObj.getString("filename")
+                            val addr = bObj.getString("flashAddress")
+                            val b64 = bObj.getString("data")
+                            val data = Base64.decode(b64, Base64.DEFAULT)
+                            binariesList.add(FirmwareBinary.create(fName, addr, data))
+                        }
+                    } else if (json != null && json.has("binary")) {
+                        val b64 = json.getString("binary")
+                        val data = Base64.decode(b64, Base64.DEFAULT)
+                        binariesList.add(FirmwareBinary.create("firmware.bin", "0x10000", data))
+                    } else if (json != null && json.has("hex")) {
+                        val hex = json.getString("hex").toByteArray()
+                        binariesList.add(FirmwareBinary.create("firmware.hex", "0x0000", hex))
+                    } else if (responseBody.isNotEmpty()) {
+                        val bytes = responseBody.toByteArray()
+                        binariesList.add(FirmwareBinary.create("firmware.bin", "0x10000", bytes))
+                    }
+
+                    val pkg = if (binariesList.isNotEmpty()) {
+                        FirmwarePackage(
+                            boardName = targetBoard.name,
+                            fqbn = targetBoard.fqbn,
+                            coreVersion = json?.optString("coreVersion", "3.1.1") ?: "3.1.1",
+                            flashMode = json?.optString("flashMode", "DIO") ?: "DIO",
+                            flashFreq = json?.optString("flashFreq", "80MHz") ?: "80MHz",
+                            flashSize = targetBoard.flashSize,
+                            binaries = binariesList,
+                            buildLogs = listOf("Successfully compiled by Arduino CLI Build Server ($cleanUrl)"),
+                            isPrecompiled = false,
+                            backendSource = "Arduino CLI Build Server ($cleanUrl)"
+                        )
+                    } else {
+                        null
                     }
 
                     emit(CompileProgress(
@@ -311,11 +568,12 @@ class CompilerService(
                         progress = 1.0f,
                         line = TerminalLine(
                             TerminalLineType.SUCCESS,
-                            "Compilation successful! Flashable firmware generated (${binaryData?.size ?: 0} bytes)."
+                            "Compilation successful! Generated ${binariesList.size} binary file(s) (${pkg?.formattedTotalSize ?: "0 KB"}). Ready to flash."
                         ),
                         isFinished = true,
                         isSuccess = true,
-                        binaryBytes = binaryData
+                        binaryBytes = binariesList.find { it.filename.contains("firmware", ignoreCase = true) || it.filename.endsWith(".bin") }?.data,
+                        firmwarePackage = pkg
                     ))
                 } else {
                     emit(CompileProgress(
@@ -323,7 +581,7 @@ class CompilerService(
                         progress = 1.0f,
                         line = TerminalLine(
                             TerminalLineType.ERROR,
-                            "Remote compiler failed (HTTP ${response.code}):\n$responseBody"
+                            "Build Server compilation failed (HTTP ${response.code}):\n$responseBody"
                         ),
                         isFinished = true,
                         isSuccess = false
@@ -335,21 +593,21 @@ class CompilerService(
                     progress = 1.0f,
                     line = TerminalLine(
                         TerminalLineType.ERROR,
-                        "Failed to connect to compiler server ($cleanUrl): ${e.message}"
+                        "Failed to connect to Build Server ($cleanUrl): ${e.message}\nMake sure the Arduino CLI server is running and reachable on this network."
                     ),
                     isFinished = true,
                     isSuccess = false
                 ))
             }
         } else {
-            // No remote build server configured
+            // No Build Server configured and local compiler check
             if (isEsp32) {
                 emit(CompileProgress(
-                    stage = "Toolchain Not Installed",
+                    stage = "Compiler Toolchain Missing",
                     progress = 1.0f,
                     line = TerminalLine(
-                        TerminalLineType.WARNING,
-                        "ESP32 compiler toolchain is not installed."
+                        TerminalLineType.ERROR,
+                        "ESP32 compilation blocked: Compiler toolchain is not available."
                     ),
                     isFinished = true,
                     isSuccess = false,
@@ -362,11 +620,14 @@ class CompilerService(
                     line = TerminalLine(
                         TerminalLineType.INFO,
                         """[ESP32 Compiler Status]
-- Sketch code syntax: Clean (0 errors).
-- ESP32 Cross-Compiler (xtensa-esp32-elf-gcc) is not bundled on this device.
-- To produce an ESP32 binary (.bin) for flashing:
-  1. Configure an Arduino-CLI build server under Settings > Compiler Settings.
-  2. Or use 'Load Test Blink Firmware' on the Upload screen to test flashing.""".trimIndent()
+- Sketch Syntax Analyzer: 0 errors detected (syntax is valid).
+- Native Xtensa Compiler (xtensa-esp32-elf-gcc): Not installed locally on Android storage.
+- Arduino CLI Build Server: Not configured.
+- Result: Real ESP32 firmware binary (.bin) cannot be produced without the compiler toolchain.
+
+REQUIRED ACTIONS:
+1. Tap 'Settings' -> 'Compiler Settings' and enter your Arduino CLI Build Server URL.
+2. Or tap 'Load Test Blink' on the Upload screen to test USB OTG flashing immediately using the bundled ESP32 Blink firmware.""".trimIndent()
                     ),
                     isFinished = true,
                     isSuccess = false,
@@ -374,11 +635,11 @@ class CompilerService(
                 ))
             } else {
                 emit(CompileProgress(
-                    stage = "Toolchain Not Installed",
+                    stage = "AVR Toolchain Missing",
                     progress = 1.0f,
                     line = TerminalLine(
-                        TerminalLineType.WARNING,
-                        "AVR compiler toolchain (avr-gcc) is not installed."
+                        TerminalLineType.ERROR,
+                        "AVR compiler toolchain (avr-gcc) is not installed on this device."
                     ),
                     isFinished = true,
                     isSuccess = false,
@@ -390,7 +651,7 @@ class CompilerService(
                     progress = 1.0f,
                     line = TerminalLine(
                         TerminalLineType.INFO,
-                        "Configure a remote Arduino-CLI build backend in Settings > Compiler Settings to compile AVR sketches into .hex."
+                        "Configure an Arduino CLI build backend in Settings > Compiler Settings to compile AVR sketches into .hex."
                     ),
                     isFinished = true,
                     isSuccess = false,

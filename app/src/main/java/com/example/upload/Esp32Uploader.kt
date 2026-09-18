@@ -3,6 +3,8 @@ package com.example.upload
 import com.example.compiler.TerminalLine
 import com.example.compiler.TerminalLineType
 import com.example.data.usb.UsbSerialPort
+import com.example.firmware.FirmwarePackage
+import com.example.firmware.FlashSegment
 import kotlinx.coroutines.delay
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -33,6 +35,49 @@ class Esp32Uploader(
 
         private const val FLASH_BLOCK_SIZE = 1024
         private const val SYNC_RETRIES = 12
+
+        fun slipFrame(raw: ByteArray): ByteArray {
+            val out = ByteArrayOutputStream()
+            out.write(SLIP_END.toInt())
+            for (b in raw) {
+                when (b) {
+                    SLIP_END -> {
+                        out.write(SLIP_ESC.toInt())
+                        out.write(SLIP_ESC_END.toInt())
+                    }
+                    SLIP_ESC -> {
+                        out.write(SLIP_ESC.toInt())
+                        out.write(SLIP_ESC_ESC.toInt())
+                    }
+                    else -> out.write(b.toInt())
+                }
+            }
+            out.write(SLIP_END.toInt())
+            return out.toByteArray()
+        }
+
+        fun slipUnframe(framed: ByteArray): ByteArray {
+            val out = ByteArrayOutputStream()
+            var escaped = false
+            for (b in framed) {
+                if (b == SLIP_END) {
+                    continue
+                }
+                if (escaped) {
+                    when (b) {
+                        SLIP_ESC_END -> out.write(SLIP_END.toInt())
+                        SLIP_ESC_ESC -> out.write(SLIP_ESC.toInt())
+                        else -> out.write(b.toInt())
+                    }
+                    escaped = false
+                } else if (b == SLIP_ESC) {
+                    escaped = true
+                } else {
+                    out.write(b.toInt())
+                }
+            }
+            return out.toByteArray()
+        }
     }
 
     private fun log(text: String, type: TerminalLineType = TerminalLineType.STDOUT) {
@@ -48,7 +93,21 @@ class Esp32Uploader(
      * 5. Post-flash reboot into user sketch
      */
     suspend fun upload(firmwareBinary: ByteArray): UploadResult {
+        return uploadSegments(listOf(FlashSegment("firmware.bin", 0x10000, firmwareBinary)))
+    }
+
+    suspend fun uploadPackage(pkg: FirmwarePackage): UploadResult {
+        log("[ESP32] Launching package upload for ${pkg.boardName} (${pkg.binaries.size} binary files, total ${pkg.formattedTotalSize}).", TerminalLineType.INFO)
+        return uploadSegments(pkg.toFlashSegments())
+    }
+
+    suspend fun uploadSegments(segments: List<FlashSegment>): UploadResult {
         try {
+            if (segments.isEmpty() || segments.all { it.data.isEmpty() }) {
+                log("[ESP32 Error] No firmware binary was provided for flashing.", TerminalLineType.ERROR)
+                return UploadResult(success = false, error = "Firmware binary is empty.")
+            }
+
             onProgress(0.05f, "Configuring Serial Port (115200 8N1)...")
             log("[ESP32] Initializing serial port: ${serialPort.chipType.label} at 115200 baud", TerminalLineType.INFO)
             serialPort.setParameters(115200, 8, 1, 0)
@@ -60,7 +119,7 @@ class Esp32Uploader(
             triggerAutoResetBootloader()
 
             // 2. Perform Sync Handshake
-            onProgress(0.20f, "Connecting to ESP32 ROM Bootloader...")
+            onProgress(0.18f, "Connecting to ESP32 ROM Bootloader...")
             log("[ESP32] Initiating SLIP handshake with ROM bootloader...", TerminalLineType.INFO)
             val synced = syncWithBootloader()
             if (!synced) {
@@ -78,55 +137,64 @@ class Esp32Uploader(
             log("[ESP32] Handshake accepted! ESP32 ROM bootloader is responsive.", TerminalLineType.SUCCESS)
 
             // 3. Read Chip Info
-            onProgress(0.30f, "Detecting Chip Revision & Parameters...")
+            onProgress(0.25f, "Detecting Chip Revision & Parameters...")
             detectChip()
 
-            // 4. Flash Firmware
-            if (firmwareBinary.isEmpty()) {
-                log("[ESP32 Error] No firmware binary was provided for flashing.", TerminalLineType.ERROR)
-                return UploadResult(success = false, error = "Firmware binary is empty.")
-            }
+            // 4. Flash Each Segment
+            val grandTotalBytes = segments.sumOf { it.data.size }
+            var writtenBytesAcrossSegments = 0
 
-            val totalSize = firmwareBinary.size
-            val totalBlocks = (totalSize + FLASH_BLOCK_SIZE - 1) / FLASH_BLOCK_SIZE
-            log("[ESP32] Preparing to flash $totalSize bytes ($totalBlocks blocks)...", TerminalLineType.INFO)
-            onProgress(0.35f, "Erasing Flash at 0x10000...")
+            for ((segIdx, segment) in segments.withIndex()) {
+                val totalSize = segment.data.size
+                if (totalSize == 0) continue
 
-            // Flash Begin
-            val beginSuccess = sendFlashBegin(totalSize, totalBlocks, 0x10000)
-            if (!beginSuccess) {
-                log("[ESP32 Warning] Flash Begin received non-zero status, retrying erase...", TerminalLineType.WARNING)
-                delay(200)
-            }
+                val totalBlocks = (totalSize + FLASH_BLOCK_SIZE - 1) / FLASH_BLOCK_SIZE
+                val hexAddr = "0x${Integer.toHexString(segment.flashOffset).uppercase()}"
+                log("[ESP32] Flashing segment [${segIdx + 1}/${segments.size}]: ${segment.filename} ($totalSize bytes, $totalBlocks blocks) to $hexAddr...", TerminalLineType.INFO)
+                onProgress(
+                    0.25f + (0.65f * (writtenBytesAcrossSegments.toFloat() / grandTotalBytes.coerceAtLeast(1))),
+                    "Erasing flash at $hexAddr for ${segment.filename}..."
+                )
 
-            // Flash Blocks
-            onProgress(0.40f, "Writing Flash Blocks...")
-            for (seq in 0 until totalBlocks) {
-                val offset = seq * FLASH_BLOCK_SIZE
-                val remaining = totalSize - offset
-                val blockSize = if (remaining < FLASH_BLOCK_SIZE) remaining else FLASH_BLOCK_SIZE
-
-                val blockData = ByteArray(FLASH_BLOCK_SIZE)
-                System.arraycopy(firmwareBinary, offset, blockData, 0, blockSize)
-
-                val blockSent = sendFlashData(seq, blockData)
-                if (!blockSent) {
-                    log("[ESP32 Error] Failed writing block $seq/$totalBlocks", TerminalLineType.ERROR)
-                    return UploadResult(success = false, error = "Write failure at block $seq")
+                // Flash Begin
+                val beginSuccess = sendFlashBegin(totalSize, totalBlocks, segment.flashOffset)
+                if (!beginSuccess) {
+                    log("[ESP32 Warning] Flash Begin received non-zero status, retrying erase...", TerminalLineType.WARNING)
+                    delay(200)
                 }
 
-                val progress = 0.40f + (0.50f * ((seq + 1).toFloat() / totalBlocks))
-                val percent = ((seq + 1) * 100) / totalBlocks
-                onProgress(progress, "Writing Flash: $percent% ($offset / $totalSize bytes)")
-                if (seq % 10 == 0 || seq == totalBlocks - 1) {
-                    log("Wrote block ${seq + 1}/$totalBlocks ($percent%)", TerminalLineType.STDOUT)
+                // Flash Blocks
+                for (seq in 0 until totalBlocks) {
+                    val offset = seq * FLASH_BLOCK_SIZE
+                    val remaining = totalSize - offset
+                    val blockSize = if (remaining < FLASH_BLOCK_SIZE) remaining else FLASH_BLOCK_SIZE
+
+                    val blockData = ByteArray(FLASH_BLOCK_SIZE)
+                    System.arraycopy(segment.data, offset, blockData, 0, blockSize)
+
+                    val blockSent = sendFlashData(seq, blockData)
+                    if (!blockSent) {
+                        log("[ESP32 Error] Failed writing block $seq/$totalBlocks for ${segment.filename}", TerminalLineType.ERROR)
+                        return UploadResult(success = false, error = "Write failure at block $seq of ${segment.filename}")
+                    }
+
+                    writtenBytesAcrossSegments += blockSize
+                    val overallProgress = 0.25f + (0.65f * (writtenBytesAcrossSegments.toFloat() / grandTotalBytes.coerceAtLeast(1)))
+                    val overallPercent = ((writtenBytesAcrossSegments * 100) / grandTotalBytes.coerceAtLeast(1)).coerceAtMost(100)
+                    onProgress(overallProgress, "Writing ${segment.filename}: $overallPercent% ($writtenBytesAcrossSegments / $grandTotalBytes bytes)")
+
+                    if (seq % 12 == 0 || seq == totalBlocks - 1) {
+                        val segPercent = ((seq + 1) * 100) / totalBlocks
+                        log("  ${segment.filename} -> wrote block ${seq + 1}/$totalBlocks ($segPercent%)", TerminalLineType.STDOUT)
+                    }
                 }
+                log("[ESP32] Successfully verified segment ${segment.filename} at $hexAddr.", TerminalLineType.SUCCESS)
             }
 
             // Flash End
             onProgress(0.92f, "Finalizing Flash & Verifying...")
             sendFlashEnd(reboot = false)
-            log("[ESP32] Flash programming verified successfully!", TerminalLineType.SUCCESS)
+            log("[ESP32] All ${segments.size} firmware segment(s) programmed successfully!", TerminalLineType.SUCCESS)
 
             // 5. Hard Reset into User Firmware
             onProgress(0.98f, "Resetting ESP32 into User Code...")
@@ -134,7 +202,7 @@ class Esp32Uploader(
             resetToUserCode()
 
             onProgress(1.0f, "Upload Complete!")
-            log("[ESP32] Done! Sketch is running on ESP32.", TerminalLineType.SUCCESS)
+            log("[ESP32] Done! ESP32 sketch is executing.", TerminalLineType.SUCCESS)
             return UploadResult(success = true)
 
         } catch (e: Exception) {

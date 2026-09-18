@@ -1,0 +1,10 @@
+ESP32 Precompiled Arduino Blink Firmware Package
+Board: ESP32 Dev Module (FQBN: esp32:esp32:esp32)
+Core: ESP32 Arduino Core v3.x (Xtensa LX6)
+Flash Mode: DIO, 80MHz, 4MB Flash
+Partitions: Default 4MB with spiffs (1.2MB APP, SPIFFS, NVS, OTA)
+Binary Segments:
+  - 0x1000: bootloader.bin (2nd Stage Bootloader)
+  - 0x8000: partitions.bin (Partition Table)
+  - 0xE000: boot_app0.bin (OTA Data Selector)
+  - 0x10000: firmware.bin (Blink Sketch Application)

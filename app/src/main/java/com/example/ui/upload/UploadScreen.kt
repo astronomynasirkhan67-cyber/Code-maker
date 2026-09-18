@@ -33,6 +33,9 @@ import androidx.compose.material.icons.filled.SettingsInputAntenna
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Memory
+import com.example.firmware.FirmwarePackage
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -82,6 +85,7 @@ fun UploadScreen(
     selectedDevice: UsbBoardInfo?,
     workflowState: IdeWorkflowState,
     hasCompiledBinary: Boolean,
+    activeFirmwarePackage: FirmwarePackage? = null,
     isUploading: Boolean,
     uploadProgress: Float,
     uploadStage: String,
@@ -94,6 +98,7 @@ fun UploadScreen(
     onStartUpload: (UsbDevice?) -> Unit,
     onChangeBoardClick: () -> Unit,
     onOpenSerialMonitor: () -> Unit,
+    onExportFirmwareZip: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -392,19 +397,22 @@ fun UploadScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
+                        val hasFirmware = hasCompiledBinary || activeFirmwarePackage != null
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = if (hasCompiledBinary) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                imageVector = if (hasFirmware) Icons.Default.CheckCircle else Icons.Default.Warning,
                                 contentDescription = null,
-                                tint = if (hasCompiledBinary) ArduinoAccentGreen else ArduinoAccentOrange,
+                                tint = if (hasFirmware) ArduinoAccentGreen else ArduinoAccentOrange,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (hasCompiledBinary) "Firmware Binary Ready" else "Compilation Required",
+                                text = if (activeFirmwarePackage != null) "ESP32 Firmware Package Ready"
+                                else if (hasCompiledBinary) "Firmware Binary Ready"
+                                else "Compilation Required",
                                 style = MaterialTheme.typography.titleSmall.copy(
                                     fontWeight = FontWeight.Bold,
-                                    color = if (hasCompiledBinary) ArduinoAccentGreen else ArduinoAccentOrange
+                                    color = if (hasFirmware) ArduinoAccentGreen else ArduinoAccentOrange
                                 )
                             )
                         }
@@ -430,7 +438,81 @@ fun UploadScreen(
                         }
                     }
 
-                    if (!hasCompiledBinary) {
+                    if (activeFirmwarePackage != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = ArduinoTeal.copy(alpha = 0.08f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.Default.Memory,
+                                            contentDescription = null,
+                                            tint = ArduinoTealLight,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "${activeFirmwarePackage.targetChip} • ${activeFirmwarePackage.formattedTotalSize} (${activeFirmwarePackage.binaries.size} segments)",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = ArduinoTealLight
+                                            )
+                                        )
+                                    }
+
+                                    if (onExportFirmwareZip != null) {
+                                        OutlinedButton(
+                                            onClick = onExportFirmwareZip,
+                                            shape = RoundedCornerShape(6.dp),
+                                            modifier = Modifier.height(28.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Share,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Export ZIP", fontSize = 10.sp)
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                activeFirmwarePackage.binaries.forEach { seg ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "${seg.flashAddress}: ${seg.filename}",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 10.5.sp
+                                            )
+                                        )
+                                        Text(
+                                            text = "${seg.size} bytes",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                fontSize = 10.5.sp
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else if (!hasCompiledBinary) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = "Upload is gated: You must compile your sketch first to generate a valid binary, or tap 'Load Test Blink' to test flasher hardware immediately.",

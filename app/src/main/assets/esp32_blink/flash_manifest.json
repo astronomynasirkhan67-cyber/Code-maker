@@ -1,0 +1,39 @@
+{
+  "board": "ESP32 Dev Module",
+  "fqbn": "esp32:esp32:esp32",
+  "coreVersion": "3.1.1",
+  "flashMode": "DIO",
+  "flashFreq": "80MHz",
+  "flashSize": "4MB",
+  "buildTimestamp": 1726645543000,
+  "binaries": [
+    {
+      "filename": "bootloader.bin",
+      "flashAddress": "0x1000",
+      "flashOffset": 4096,
+      "size": 14320,
+      "sha256": "590a8efd6300c16deb9fa280b91ea170212c0b1c8b355e9a28ac45056adde4e5"
+    },
+    {
+      "filename": "partitions.bin",
+      "flashAddress": "0x8000",
+      "flashOffset": 32768,
+      "size": 3072,
+      "sha256": "8c20c25b1e767e6ac5131c2c092876a70e8322b144dd92991acd2aa181b0f9ef"
+    },
+    {
+      "filename": "boot_app0.bin",
+      "flashAddress": "0xE000",
+      "flashOffset": 57344,
+      "size": 8192,
+      "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0"
+    },
+    {
+      "filename": "firmware.bin",
+      "flashAddress": "0x10000",
+      "flashOffset": 65536,
+      "size": 192192,
+      "sha256": "6a6b16a5c199ccba347e59c15c35a49d0b8cc1893b81a9f6d17a785d866a5822"
+    }
+  ]
+}

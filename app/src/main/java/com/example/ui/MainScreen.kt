@@ -48,6 +48,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalContext
+import android.content.Intent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -116,6 +118,8 @@ fun MainScreen(
 
     val workflowState by viewModel.workflowState.collectAsState()
     val lastAttachedDevice by viewModel.lastAttachedDevice.collectAsState()
+    val activeFirmwarePackage by viewModel.activeFirmwarePackage.collectAsState()
+    val context = LocalContext.current
 
     val activeProject = allProjects.find { it.id == currentProjectId }
     val projectName = activeProject?.name ?: "Mobile Arduino IDE"
@@ -339,6 +343,7 @@ fun MainScreen(
                             selectedDevice = selectedUsbDevice,
                             workflowState = workflowState,
                             hasCompiledBinary = viewModel.hasCompiledBinary,
+                            activeFirmwarePackage = activeFirmwarePackage,
                             isUploading = isUploading,
                             uploadProgress = uploadProgress,
                             uploadStage = uploadStage,
@@ -350,7 +355,14 @@ fun MainScreen(
                             onLoadSampleBlink = { viewModel.loadSampleBlinkFirmware(it) },
                             onStartUpload = { viewModel.startUpload(it) },
                             onChangeBoardClick = { viewModel.navigateTo(Screen.BOARDS) },
-                            onOpenSerialMonitor = { viewModel.navigateTo(Screen.SERIAL_MONITOR) }
+                            onOpenSerialMonitor = { viewModel.navigateTo(Screen.SERIAL_MONITOR) },
+                            onExportFirmwareZip = {
+                                val zipFile = viewModel.exportFirmwareZip()
+                                if (zipFile != null) {
+                                    val shareIntent = viewModel.shareFirmwareZip(zipFile)
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share ESP32 Firmware Package"))
+                                }
+                            }
                         )
 
                         Screen.EDITOR -> EditorScreen(
@@ -432,7 +444,10 @@ fun MainScreen(
 
                         Screen.SETTINGS -> SettingsScreen(
                             settings = settings,
-                            onUpdateSetting = { k, v -> viewModel.updateSetting(k, v) }
+                            onUpdateSetting = { k, v -> viewModel.updateSetting(k, v) },
+                            onTestBuildServer = { url -> viewModel.checkBuildServerHealth(url) },
+                            onCheckLocalToolchain = { viewModel.checkLocalToolchain() },
+                            onClearCache = { viewModel.clearBuildCache() }
                         )
                     }
                 }

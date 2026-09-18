@@ -10,6 +10,7 @@ import android.hardware.usb.UsbManager
 import android.os.Build
 import com.example.compiler.TerminalLine
 import com.example.compiler.TerminalLineType
+import com.example.firmware.FirmwarePackage
 import com.example.upload.AvrStk500Uploader
 import com.example.upload.Esp32Uploader
 import kotlinx.coroutines.CoroutineScope
@@ -365,6 +366,7 @@ class UsbHardwareManager(private val context: Context) {
         device: UsbDevice?,
         targetFqbn: String,
         compiledBytes: ByteArray?,
+        firmwarePackage: FirmwarePackage? = null,
         onProgress: (Float, String) -> Unit = { _, _ -> },
         onTerminalLog: (TerminalLine) -> Unit = {}
     ): UploadResult {
@@ -388,7 +390,10 @@ class UsbHardwareManager(private val context: Context) {
             return UploadResult.Failed(err, logBuilder.toString())
         }
 
-        if (compiledBytes == null || compiledBytes.isEmpty()) {
+        val hasPackage = firmwarePackage != null && firmwarePackage.binaries.isNotEmpty()
+        val hasSingleBinary = compiledBytes != null && compiledBytes.isNotEmpty()
+
+        if (!hasPackage && !hasSingleBinary) {
             val err = "Upload failed: No compiled binary (.bin / .hex) available.\n" +
                     "You must first compile the sketch and verify zero errors before uploading."
             log(err, TerminalLineType.ERROR)
@@ -420,7 +425,12 @@ class UsbHardwareManager(private val context: Context) {
                     onLog = { onTerminalLog(it) },
                     onProgress = { p, s -> onProgress(p, s) }
                 )
-                uploader.upload(compiledBytes)
+                if (firmwarePackage != null && firmwarePackage.binaries.isNotEmpty()) {
+                    log("Using multi-segment firmware package (${firmwarePackage.binaries.size} binary files, total ${firmwarePackage.formattedTotalSize}).", TerminalLineType.INFO)
+                    uploader.uploadPackage(firmwarePackage)
+                } else {
+                    uploader.upload(compiledBytes ?: ByteArray(0))
+                }
             } else {
                 log("Detected AVR / Arduino target ($targetFqbn). Launching AVR STK500 Uploader...", TerminalLineType.INFO)
                 val uploader = AvrStk500Uploader(
@@ -428,11 +438,17 @@ class UsbHardwareManager(private val context: Context) {
                     onLog = { onTerminalLog(it) },
                     onProgress = { p, s -> onProgress(p, s) }
                 )
-                uploader.upload(compiledBytes)
+                uploader.upload(compiledBytes ?: ByteArray(0))
+            }
+
+            val uploadedSize = if (firmwarePackage != null && firmwarePackage.binaries.isNotEmpty()) {
+                firmwarePackage.totalSizeBytes
+            } else {
+                compiledBytes?.size ?: 0
             }
 
             if (uploadResult.success) {
-                UploadResult.Success(compiledBytes.size, logBuilder.toString())
+                UploadResult.Success(uploadedSize, logBuilder.toString())
             } else {
                 UploadResult.Failed(uploadResult.error ?: "Upload failed", logBuilder.toString())
             }
